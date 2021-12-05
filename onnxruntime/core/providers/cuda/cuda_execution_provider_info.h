@@ -50,7 +50,7 @@ struct CUDAExecutionProviderInfo {
   CUDAExecutionProviderExternalAllocatorInfo external_allocator_info{};
   // By default use fix workspace size (32M) for Conv algo search, the final algo might not be the best.
   // If set to true, try to use as much as possible memory for algo search.
-  bool cudnn_conv_use_max_workspace{false};
+  bool cudnn_conv_use_max_workspace{true};
 
   static CUDAExecutionProviderInfo FromProviderOptions(const ProviderOptions& options);
   static ProviderOptions ToProviderOptions(const CUDAExecutionProviderInfo& info);
