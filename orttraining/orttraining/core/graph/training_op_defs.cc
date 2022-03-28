@@ -463,8 +463,8 @@ OpSchema& RegisterLambOpSchema(OpSchema&& op_schema) {
           "Constrain update count to 64-bit integer")
       .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
         // Handle update count, the first output.
-        const size_t step_input_index = 4;
-        const size_t step_output_index = 0;
+        constexpr size_t step_input_index = 4;
+        constexpr size_t step_output_index = 0;
         auto input_type = ctx.getInputType(step_input_index);
         if (input_type != nullptr) {
           propagateElemTypeFromInputToOutput(ctx, step_input_index, step_output_index);
@@ -1724,40 +1724,32 @@ Example 4:
               value is specified for ratio. In general, it is unclear why we need the training_mode as an
               input here, since the Gradient will be used only for training.
             */
-            OperatorSetIdProto onnx_opset_13;
-            onnx_opset_13.set_domain("");
-            onnx_opset_13.set_version(13);
-
             auto* tp = ctx.getInputType(0);
             if ((tp == nullptr) || (!tp->has_tensor_type()))
               return false;
             auto elem_type = (ONNX_NAMESPACE::TensorProto_DataType)tp->tensor_type().elem_type();
-            if (elem_type == ONNX_NAMESPACE::TensorProto_DataType::TensorProto_DataType_BFLOAT16)
-              return false;  // ONNX op Where doesn't support bfloat16 yet.
+
+            FunctionBuilder builder(functionProto);
+            builder
+                .AddOpset("", 16)
+                .Const("C0", ToTensor(0.0f, elem_type))
+                .Const("C1", ToTensor(1.0f, elem_type));
 
             if (ctx.hasInput(2)) {
               // ratio specified.
-              std::vector<FunctionBodyHelper::NodeDef> body{
-                  ONNX_NAMESPACE::Const("C0", 0.0f, elem_type),
-                  ONNX_NAMESPACE::Const("C1", 1.0f, elem_type),
-                  {{"ratio_elem_type"}, "Cast", {"ratio"}, {MakeAttribute("to", int64_t(elem_type))}},
-                  {{"scale"}, "Sub", {"C1", "ratio_elem_type"}},
-                  {{"scaled_dy"}, "Div", {"dy", "scale"}},
-                  {{"dx"}, "Where", {"mask", "scaled_dy", "C0"}}};
-
-              return ONNX_NAMESPACE::FunctionBodyHelper::BuildFunctionProto(functionProto, schema, body, {onnx_opset_13});
+              builder.Add("ratio_elem_type = Cast(ratio)", "to", int64_t(elem_type));
             } else {
               // ratio not specified. Use a value of 0.5
-              std::vector<FunctionBodyHelper::NodeDef> body{
-                  ONNX_NAMESPACE::Const("C0", 0.0f, elem_type),
-                  ONNX_NAMESPACE::Const("C1", 1.0f, elem_type),
-                  ONNX_NAMESPACE::Const("ratio_elem_type", 0.5f, elem_type),
-                  {{"scale"}, "Sub", {"C1", "ratio_elem_type"}},
-                  {{"scaled_dy"}, "Div", {"dy", "scale"}},
-                  {{"dx"}, "Where", {"mask", "scaled_dy", "C0"}}};
-
-              return ONNX_NAMESPACE::FunctionBodyHelper::BuildFunctionProto(functionProto, schema, body, {onnx_opset_13});
+              builder.Const("ratio_elem_type", ToTensor(0.5f, elem_type));
             }
+            builder.Add(R"(
+                  scale = Sub (C1, ratio_elem_type)
+                  scaled_dy = Div (dy, scale)
+                  dx = Where (mask, scaled_dy, C0)
+                )");
+
+            schema.BuildFunction(functionProto);
+            return true;
           });
 
   ONNX_CONTRIB_OPERATOR_SCHEMA(BroadcastGradientArgs)
@@ -2089,27 +2081,27 @@ Example 4:
             auto* tp = ctx.getInputType(0);
             if ((tp == nullptr) || (!tp->has_tensor_type()))
               return false;
-            auto elem_type = tp->tensor_type().elem_type();
+            auto elem_type = (TensorProto_DataType)(tp->tensor_type().elem_type());
             double kAlpha = M_2_SQRTPI * M_SQRT1_2 * 0.5;
             FunctionBuilder builder(functionProto);
             builder
                 .AddOpset("", 13)
-                .Const("C_Half", 0.5f, elem_type)
-                .Const("C_One", 1.0f, elem_type)
-                .Const("C_SqrtHalf", float(M_SQRT1_2), elem_type)
-                .Const("C_MinusHalf", -0.5f, elem_type)
-                .Const("C_alpha", kAlpha, elem_type)
+                .Const("C_Half", ToTensor(0.5f, elem_type))
+                .Const("C_One", ToTensor(1.0f, elem_type))
+                .Const("C_SqrtHalf", ToTensor(float(M_SQRT1_2), elem_type))
+                .Const("C_MinusHalf", ToTensor(-0.5f, elem_type))
+                .Const("C_alpha", ToTensor(kAlpha, elem_type))
                 .Add(R"(
-                    ErfArg = Mul (X, C_SqrtHalf) 
-                    ErfTerm = Erf (ErfArg) 
-                    PartialSum = Add (ErfTerm, C_One) 
-                    HalfPartialSum = Mul (C_Half, PartialSum) 
-                    AlphaX = Mul (X, C_alpha) 
-                    MinusHalfX = Mul (C_MinusHalf, X) 
-                    ExpArg = Mul (MinusHalfX, X) 
-                    ExpTerm = Exp (ExpArg) 
-                    Term3 = Mul (AlphaX, ExpTerm) 
-                    FullSum = Add (HalfPartialSum, Term3) 
+                    ErfArg = Mul (X, C_SqrtHalf)
+                    ErfTerm = Erf (ErfArg)
+                    PartialSum = Add (ErfTerm, C_One)
+                    HalfPartialSum = Mul (C_Half, PartialSum)
+                    AlphaX = Mul (X, C_alpha)
+                    MinusHalfX = Mul (C_MinusHalf, X)
+                    ExpArg = Mul (MinusHalfX, X)
+                    ExpTerm = Exp (ExpArg)
+                    Term3 = Mul (AlphaX, ExpTerm)
+                    FullSum = Add (HalfPartialSum, Term3)
                     dX = Mul (dY, FullSum)
                 )");
 
@@ -2774,11 +2766,11 @@ Return true if all elements are true and false otherwise.
             FunctionBuilder builder(functionProto);
             builder
                 .AddOpset("", 13)
-                .Const("half", 0.5f, elem_type)
-                .Const("one", 1.0f, elem_type)
-                .Const("alpha", kAlpha, elem_type)
-                .Const("gamma", kGamma, elem_type)
-                .Const("beta", kBeta, elem_type)
+                .Const("half", ToTensor(0.5f, elem_type))
+                .Const("one", ToTensor(1.0f, elem_type))
+                .Const("alpha", ToTensor(kAlpha, elem_type))
+                .Const("gamma", ToTensor(kGamma, elem_type))
+                .Const("beta", ToTensor(kBeta, elem_type))
                 .Add(R"ONNX(
                   x_square = Mul (X, X)
                   x_cube = Mul (X, x_square)
@@ -2814,7 +2806,7 @@ Return true if all elements are true and false otherwise.
       .Output(0, "dX", "Gradient of the input.", "T")
       .TypeConstraint(
           "T",
-          {"tensor(float16)", "tensor(float)", "tensor(double)"},
+          {"tensor(float16)", "tensor(float)", "tensor(double)", "tensor(bfloat16)"},
           "Constrain input and output types to float tensors.")
       .TypeAndShapeInferenceFunction(ONNX_NAMESPACE::propagateShapeAndTypeFromFirstInput);
 
@@ -2955,7 +2947,7 @@ Return true if all elements are true and false otherwise.
               /*min_arity*/ 0)
       .Attr("non_differentiable_outputs", "The indices of the module outputs that doesn't have a gradient.", AttributeProto::INTS, OPTIONAL_VALUE)
       .Attr("full_shape_outputs", "The indices of the module outputs that must have full shape.", AttributeProto::INTS)
-      .TypeConstraint("T", OpSchema::all_tensor_types(), "Allow inputs and outputs to be any kind of tensor.")
+      .TypeConstraint("T", OpSchema::all_tensor_types_with_bfloat(), "Allow inputs and outputs to be any kind of tensor.")
       .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
         auto non_differentiable_outputs = ctx.getAttribute("non_differentiable_outputs");
         std::unordered_set<size_t> non_differentiable_outputs_indices{};
@@ -2994,18 +2986,18 @@ Return true if all elements are true and false otherwise.
       });
 
 #ifdef ENABLE_TRAINING
-  ONNX_CONTRIB_OPERATOR_SCHEMA(ATenOp)
-      .SetDomain(kMSDomain)
+  ONNX_CONTRIB_OPERATOR_SCHEMA(ATen)
+      .SetDomain(kPytorchAtenDomain)
       .SinceVersion(1)
       .SetSupportLevel(OpSchema::SupportType::EXPERIMENTAL)
-      .SetDoc("ATenOp")
-      .Input(0, "inputs", "ATenOp inputs.", "T", OpSchema::Variadic,
+      .SetDoc("ATen")
+      .Input(0, "inputs", "ATen Op inputs.", "T", OpSchema::Variadic,
              /*is_homogeneous*/ false,
              /*min_arity*/ 1)
-      .Output(0, "outputs", "ATenOp outputs.", "T", OpSchema::Variadic,
+      .Output(0, "outputs", "ATen Op outputs.", "T", OpSchema::Variadic,
               /*is_homogeneous*/ false,
               /*min_arity*/ 1)
-      .Attr("name", "Name of ATen operator.", AttributeProto::STRING)
+      .Attr("operator", "Name of ATen operator.", AttributeProto::STRING)
       .Attr("overload_name", "Overload name of ATen operator.", AttributeProto::STRING, false)
       .TypeConstraint("T", OpSchema::all_tensor_types(), "Allow inputs and outputs to be any kind of tensor.");
 #endif
@@ -3444,9 +3436,13 @@ Return true if all elements are true and false otherwise.
 }  // namespace training
 
 void RegisterOrtOpSchemas() {
-  ONNX_NAMESPACE::OpSchemaRegistry::DomainToVersionRange::Instance().AddDomainToVersion(onnxruntime::kMSDomain, 1, 1);
-  ONNX_NAMESPACE::OpSchemaRegistry::DomainToVersionRange::Instance().AddDomainToVersion(onnxruntime::kMSExperimentalDomain, 1, 1);
-  ONNX_NAMESPACE::OpSchemaRegistry::DomainToVersionRange::Instance().AddDomainToVersion(onnxruntime::kMSNchwcDomain, 1, 1);
+  auto& domainToVersionRangeInstance = ONNX_NAMESPACE::OpSchemaRegistry::DomainToVersionRange::Instance();
+  if (domainToVersionRangeInstance.Map().find(onnxruntime::kMSDomain) == domainToVersionRangeInstance.Map().end()) {
+    // External shared providers may have already added kMSDomain
+    domainToVersionRangeInstance.AddDomainToVersion(onnxruntime::kMSDomain, 1, 1);
+  }
+  domainToVersionRangeInstance.AddDomainToVersion(onnxruntime::kMSExperimentalDomain, 1, 1);
+  domainToVersionRangeInstance.AddDomainToVersion(onnxruntime::kMSNchwcDomain, 1, 1);
 
   onnxruntime::contrib::RegisterContribSchemas();
   onnxruntime::training::RegisterTrainingOpSchemas();

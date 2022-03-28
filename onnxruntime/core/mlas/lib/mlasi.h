@@ -96,18 +96,54 @@ Abstract:
 //
 // Select the threading model.
 //
-// N.B. MLAS_NO_ONNXRUNTIME_THREADPOOL is used to build MLAS test code outside
+// N.B. BUILD_MLAS_NO_ONNXRUNTIME is used to build MLAS test code outside
 // of the ONNX Runtime source tree. OpenMP may or may not be enabled in this
 // configuration.
 //
 
-#if !defined(MLAS_NO_ONNXRUNTIME_THREADPOOL)
+#if !defined(BUILD_MLAS_NO_ONNXRUNTIME)
 #include "core/platform/threadpool.h"
+
+#if defined(MLAS_TARGET_ARM64) && defined(__linux__)
+
+#include "core/common/cpuid_info.h"
+using MLAS_CPUIDINFO = onnxruntime::CPUIDInfo;
+
+#include <unistd.h>
+#include <sys/syscall.h>
+#if !defined(__NR_getcpu)
+#include <asm-generic/unistd.h>
 #endif
 
-#if defined(_OPENMP)
-#include <omp.h>
-#endif
+#endif // MLAS_TARGET_ARM64
+
+#else  // BUILD_MLAS_NO_ONNXRUNTIME
+
+#if defined(MLAS_TARGET_ARM64) && defined(__linux__)
+class MLASCPUIDInfo
+{
+   public:
+    static const MLASCPUIDInfo& GetCPUIDInfo()
+    {
+        static MLASCPUIDInfo cpuid_info;
+        return cpuid_info;
+    }
+
+    // ARM
+    bool HasArmNeonDot() const { return has_arm_neon_dot_; }
+
+    int32_t GetCurrentUarch() { return -1; }
+
+   private:
+    MLASCPUIDInfo();
+
+    bool has_arm_neon_dot_{false};
+};
+using MLAS_CPUIDINFO = MLASCPUIDInfo;
+
+#endif // MLAS_TARGET_ARM64
+
+#endif // BUILD_MLAS_NO_ONNXRUNTIME
 
 //
 // Define the maximum number of threads supported by this implementation.
@@ -500,6 +536,8 @@ extern "C" {
     MLAS_GEMM_FLOAT_KERNEL MlasSgemmKernelPOWER10;
     MLAS_GEMM_DOUBLE_KERNEL MlasDgemmKernel;
     MLAS_GEMM_DOUBLE_KERNEL MlasDgemmKernelPOWER10;
+    MLAS_QUANTIZE_LINEAR_S8_KERNEL MlasQuantizeLinearS8KernelVSX;
+    MLAS_QUANTIZE_LINEAR_U8_KERNEL MlasQuantizeLinearU8KernelVSX;
 #else
     MLAS_GEMM_FLOAT_KERNEL MlasSgemmKernelZero;
     MLAS_GEMM_FLOAT_KERNEL MlasSgemmKernelAdd;
@@ -667,7 +705,15 @@ extern const MLAS_GEMM_QUANT_DISPATCH MlasGemmS8S8DispatchNeon;
 extern const MLAS_GEMM_QUANT_DISPATCH MlasGemmU8X8DispatchUdot;
 extern const MLAS_GEMM_QUANT_DISPATCH MlasGemmS8S8DispatchSdot;
 extern const MLAS_GEMM_QUANT_DISPATCH MlasGemmU8X8DispatchWasmSimd;
-extern const MLAS_GEMM_QUANT_DISPATCH MlasGemmU8X8DispatchDefault;
+extern const MLAS_GEMM_QUANT_DISPATCH MlasGemmQuantDispatchDefault;
+extern const MLAS_GEMM_QUANT_DISPATCH MlasGemm8X8DispatchPOWER10;
+
+//
+// Symmetric quantized qgemm dispatch structure
+//
+struct MLAS_SYMM_QGEMM_DISPATCH;
+extern const MLAS_SYMM_QGEMM_DISPATCH MlasSymmQgemmS8DispatchNeon;
+extern const MLAS_SYMM_QGEMM_DISPATCH MlasSymmQgemmS8DispatchSdot;
 
 //
 // Symmetric quantized integer convolution dispatch structure.
@@ -679,7 +725,10 @@ extern const MLAS_CONV_SYM_DISPATCH MlasConvSymDispatchAvx2;
 extern const MLAS_CONV_SYM_DISPATCH MlasConvSymDispatchAvxVnni;
 extern const MLAS_CONV_SYM_DISPATCH MlasConvSymDispatchAvx512Core;
 extern const MLAS_CONV_SYM_DISPATCH MlasConvSymDispatchAvx512Vnni;
-extern const MLAS_CONV_SYM_DISPATCH MlasConvSymDispatchNeon;
+extern const MLAS_CONV_SYM_DISPATCH MlasConvSymU8DispatchNeon;
+extern const MLAS_CONV_SYM_DISPATCH MlasConvSymS8DispatchNeon;
+extern const MLAS_CONV_SYM_DISPATCH MlasConvSymU8DispatchDot;
+extern const MLAS_CONV_SYM_DISPATCH MlasConvSymS8DispatchDot;
 
 //
 // Quantized depthwise convolution kernels.
@@ -732,21 +781,50 @@ struct MLAS_CONV_SYM_POST_PROCESS_PARAMS {
     int32_t OutputZeroPoint;
 };
 
-typedef
-void
-(MLASCALL MLAS_CONV_SYM_DEPTHWISE_ROUTINE_KERNELSIZE)(
-    uint8_t const* const* InputIndirection,
-    int8_t const* Filter,
-    size_t Channels,
-    uint8_t* Output,
-    size_t OutputCount,
-    MLAS_CONV_SYM_POST_PROCESS_PARAMS const* PostProcessParams,
-    unsigned KernelFlags
-    );
-
 //
 // Environment information class.
 //
+
+/**
+ * @brief IDs for cpu microarchitectures.
+ *
+ * Copied from python cpuinfo package. Can't use the definition
+ * from cpuinfo directly as it causes lots of compilation issues
+ * in many platforms that we support.
+ */
+enum MlasUArch {
+    cpuinfo_uarch_unknown = 0,
+
+    /** ARM Cortex-A32. */
+    cpuinfo_uarch_cortex_a32 = 0x00300332,
+    /** ARM Cortex-A35. */
+    cpuinfo_uarch_cortex_a35 = 0x00300335,
+    /** ARM Cortex-A53. */
+    cpuinfo_uarch_cortex_a53 = 0x00300353,
+    /** ARM Cortex-A55 revision 0 (restricted dual-issue capabilities compared to revision 1+). */
+    cpuinfo_uarch_cortex_a55r0 = 0x00300354,
+    /** ARM Cortex-A55. */
+    cpuinfo_uarch_cortex_a55 = 0x00300355,
+    /** ARM Cortex-A57. */
+    cpuinfo_uarch_cortex_a57 = 0x00300357,
+    /** ARM Cortex-A65. */
+    cpuinfo_uarch_cortex_a65 = 0x00300365,
+    /** ARM Cortex-A72. */
+    cpuinfo_uarch_cortex_a72 = 0x00300372,
+    /** ARM Cortex-A73. */
+    cpuinfo_uarch_cortex_a73 = 0x00300373,
+    /** ARM Cortex-A75. */
+    cpuinfo_uarch_cortex_a75 = 0x00300375,
+    /** ARM Cortex-A76. */
+    cpuinfo_uarch_cortex_a76 = 0x00300376,
+    /** ARM Cortex-A77. */
+    cpuinfo_uarch_cortex_a77 = 0x00300377,
+    /** ARM Cortex-A78. */
+    cpuinfo_uarch_cortex_a78 = 0x00300378,
+};
+
+enum MlasCoreType { mlas_core_unknown = 0, mlas_core_little = 2, mlas_core_big = 3 };
+
 
 struct MLAS_PLATFORM {
 
@@ -762,6 +840,7 @@ struct MLAS_PLATFORM {
 #elif defined(MLAS_TARGET_ARM64)
     const MLAS_GEMM_QUANT_DISPATCH* GemmU8X8Dispatch;
 #endif
+    const MLAS_SYMM_QGEMM_DISPATCH* SymmQgemmDispatch{nullptr};
 
     const MLAS_CONV_SYM_DISPATCH* ConvSymU8S8Dispatch{nullptr};
     const MLAS_CONV_SYM_DISPATCH* ConvSymS8S8Dispatch{nullptr};
@@ -773,6 +852,9 @@ struct MLAS_PLATFORM {
 
 #if defined(MLAS_TARGET_POWER)
     MLAS_GEMM_DOUBLE_KERNEL* GemmDoubleKernel;
+    const MLAS_GEMM_QUANT_DISPATCH* GemmU8X8Dispatch;
+    MLAS_QUANTIZE_LINEAR_S8_KERNEL* QuantizeLinearS8Kernel;
+    MLAS_QUANTIZE_LINEAR_U8_KERNEL* QuantizeLinearU8Kernel;
 #endif
 #if defined(MLAS_TARGET_AMD64)
     MLAS_SGEMM_KERNEL_M1_ROUTINE* KernelM1Routine;
@@ -803,13 +885,64 @@ struct MLAS_PLATFORM {
     uint32_t NchwcBlockSize;
     uint32_t PreferredBufferAlignment;
     int32_t MaximumThreadCount;
+#elif defined(MLAS_TARGET_ARM64)
+    static constexpr int32_t MaximumThreadCount = MLAS_MAXIMUM_THREAD_COUNT * 4;
 #else
     static constexpr int32_t MaximumThreadCount = MLAS_MAXIMUM_THREAD_COUNT;
 #endif
 
+#if defined(MLAS_TARGET_ARM64) && defined(__linux__)
+    // TODO!! implement uarch detection in Windows
+    std::vector<MlasCoreType> mlas_coretype_tbl;
+#endif
+
+    /**
+     *  @return 2 current core is little core with narrow memory load (e.g. ARMv8 a53)
+     *          3 current core is big core with wider load (e.g. ARMv8 a72)
+     */
+    MlasCoreType GetCoreType()
+    {
+#if defined(MLAS_TARGET_ARM64) && defined(__linux__)
+
+        if (mlas_coretype_tbl.size() == 0) {
+            // functionality missing, return default
+            return mlas_core_big;
+        }
+
+        unsigned cpu = 0;
+        if (syscall(__NR_getcpu, &cpu, NULL, NULL) != 0) {
+            // failed to detect current core id. give up
+            return mlas_core_big;
+        }
+
+        if (cpu >= mlas_coretype_tbl.size()) {
+            mlas_coretype_tbl.resize(cpu + 1, mlas_core_unknown);
+        }
+
+        auto core_type = mlas_coretype_tbl[cpu];
+        if (core_type == mlas_core_unknown) {
+            auto uarch = MLAS_CPUIDINFO::GetCPUIDInfo().GetCurrentUarch();
+            if (uarch == cpuinfo_uarch_cortex_a53 || uarch == cpuinfo_uarch_cortex_a55r0 ||
+                uarch == cpuinfo_uarch_cortex_a55) {
+                core_type = mlas_core_little;
+            } else {
+                core_type = mlas_core_big;
+            }
+            mlas_coretype_tbl[cpu] = core_type;
+        }
+        return core_type;
+
+#else
+        return mlas_core_big;
+#endif
+    }
 };
 
-extern MLAS_PLATFORM MlasPlatform;
+inline
+MLAS_PLATFORM& GetMlasPlatform(){
+    static MLAS_PLATFORM MlasPlatform;
+    return MlasPlatform;
+}
 
 //
 // Threading support.
@@ -829,6 +962,13 @@ MlasExecuteThreaded(
     ptrdiff_t Iterations,
     MLAS_THREADPOOL* ThreadPool
     );
+
+constexpr
+size_t
+MlasDivRoundup(size_t up, size_t down)
+{
+    return (up + down - 1) / down;
+}
 
 /**
  * @brief Distribute multiple iterations of work over a thread pool if supported
@@ -850,14 +990,9 @@ MlasGetMaximumThreadCount(
     MLAS_THREADPOOL* ThreadPool
     )
 {
-#if defined(MLAS_NO_ONNXRUNTIME_THREADPOOL)
+#if defined(BUILD_MLAS_NO_ONNXRUNTIME)
     MLAS_UNREFERENCED_PARAMETER(ThreadPool);
-
-#if defined(_OPENMP)
-    return (omp_get_num_threads() == 1) ? omp_get_max_threads() : 1;
-#else
     return 1;
-#endif
 #else
     return onnxruntime::concurrency::ThreadPool::DegreeOfParallelism(ThreadPool);
 #endif
@@ -897,6 +1032,11 @@ MlasPartitionWork(
 //
 // Helpers to cast a floating point type to and from an integer bit format.
 //
+#if defined(_MSC_VER) && !defined(__clang__)
+  #pragma warning(push)
+  // VC++ suggests we can attempt to make 'MlasBitsOfFp32' constexpr, but it is not valid.
+  #pragma warning(disable:26497) 
+#endif
 
 MLAS_FORCEINLINE
 uint32_t
@@ -925,7 +1065,9 @@ MlasFp32FromBits(
     u.IntegerValue = IntegerValue;
     return u.FloatValue;
 }
-
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma warning(pop)
+#endif
 
 #if defined(MLAS_TARGET_WASM_SCALAR)
 

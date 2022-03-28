@@ -107,7 +107,7 @@ MlasGemmQuantTryGemvKernel<MLAS_GEMM_U8S8_KERNEL_AVX2>(
     )
 {
     if (!AIsSigned && BIsSigned) {
-        MlasPlatform.GemvU8S8Kernel(A, B, C, CountK, CountN, ldb);
+        GetMlasPlatform().GemvU8S8Kernel(A, B, C, CountK, CountN, ldb);
         return true;
     }
 
@@ -115,7 +115,7 @@ MlasGemmQuantTryGemvKernel<MLAS_GEMM_U8S8_KERNEL_AVX2>(
 }
 
 template<>
-MLAS_FORCEINLINE
+MLAS_FORCEINLINE constexpr
 int32_t
 MlasGemmQuantFixupZeroPointB<MLAS_GEMM_U8S8_KERNEL_AVX2>(
     int32_t ZeroPointB,
@@ -179,8 +179,8 @@ MlasGemmQuantKernel<MLAS_GEMM_U8S8_KERNEL_AVX2>(
     bool ZeroMode
     )
 {
-    return MlasPlatform.GemmU8S8Kernel(A, B, C, PackedCountK, CountM, CountN, ldc,
-                                       RowSumBuffer, ColumnSumBuffer, ZeroPointB, ZeroMode);
+    return GetMlasPlatform().GemmU8S8Kernel(A, B, C, PackedCountK, CountM, CountN, ldc,
+                                            RowSumBuffer, ColumnSumBuffer, ZeroPointB, ZeroMode);
 }
 
 const MLAS_GEMM_QUANT_DISPATCH MlasGemmU8S8DispatchAvx2 = {
@@ -260,8 +260,8 @@ MlasGemmQuantKernel<MLAS_GEMM_U8U8_KERNEL_AVX2>(
     bool ZeroMode
     )
 {
-    return MlasPlatform.GemmU8U8Kernel(A, B, C, PackedCountK, CountM, CountN, ldc,
-                                       RowSumBuffer, ColumnSumBuffer, ZeroPointB, ZeroMode);
+    return GetMlasPlatform().GemmU8U8Kernel(A, B, C, PackedCountK, CountM, CountN, ldc,
+                                            RowSumBuffer, ColumnSumBuffer, ZeroPointB, ZeroMode);
 }
 
 const MLAS_GEMM_QUANT_DISPATCH MlasGemmU8U8DispatchAvx2 = {

@@ -25,6 +25,24 @@ from typing import List
 import types
 import warnings
 from distutils.version import LooseVersion
+import random
+import numpy as np
+
+def get_random_states():
+    r_state = random.getstate()
+    np_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    torch_cuda_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+    return r_state, np_state, torch_state, torch_cuda_state
+
+def set_random_states(states):
+    r_state, np_state, torch_state, torch_cuda_state = states
+    random.setstate(r_state)
+    np.random.set_state(np_state)
+    torch.set_rng_state(torch_state)
+    if torch_cuda_state is not None:
+        torch.cuda.set_rng_state(torch_cuda_state)
+
 
 def _ortvalue_from_torch_tensor(torch_tensor):
     # TODO: Current DLPack doesn't support bool and PyTorch disables converting bool tensor to DLPack in recent commit.
@@ -38,33 +56,33 @@ def _ortvalue_from_torch_tensor(torch_tensor):
     return C.OrtValue.from_dlpack(to_dlpack(torch_tensor), is_bool_tensor)
 
 
-def _torch_tensor_from_dl_pack(dlpack, ortvalue, device):
-    torch_tensor = from_dlpack(dlpack) if device.type != 'ort' else C.ort_from_dlpack(dlpack)
+def _torch_tensor_from_dl_pack(dlpack, ortvalue):
+    torch_tensor = from_dlpack(dlpack)
     return torch_tensor.to(torch.bool) if ortvalue.data_type() == 'tensor(bool)' else torch_tensor
 
 
 def _ortvalue_to_torch_tensor(ortvalue, device):
+    if device.type == 'ort':
+        return C.to_aten_ort_device_tensor(ortvalue)
     # PyTorch's to_dlpack() uses same config for both torch.bool and torch.uint8,
     # and convert the config to torch.uint8 tensor duing from_dlpack().
     # So we need to convert the torch tensor to torch.bool type if OrtValue is bool tensor.
     dlpack_tensor = ortvalue.to_dlpack()
-    return _torch_tensor_from_dl_pack(dlpack_tensor, ortvalue, device)
+    return _torch_tensor_from_dl_pack(dlpack_tensor, ortvalue)
 
+# convert torch tensor to ort accept tensors, could be dlpack or ortvalue
 def _torch_tensor_to_dlpack(tensor):
-    if tensor.device.type == 'ort':
-        return C.ort_to_dlpack(tensor)
-    else:
-        # TODO: Current DLPack doesn't support bool and PyTorch disables converting bool tensor to DLPack in recent commit.
-        # https://github.com/pytorch/pytorch/blob/7e7be526c9d9179f35084e9cca5b5c5ad5172100/aten/src/ATen/DLConvertor.cpp#L41
-        # We need to convert bool tensor to unit8 tensor to workaround this.
-        # DLPack is discussing how to support bool type, we can remove this workaround once both DLPack
-        # and PyTorch support bool type.
-        if not tensor.is_contiguous():
-            raise ORTModuleIOError(
-                "Only contiguous tensors are supported.")
-        if tensor.dtype == torch.bool and LooseVersion(torch.__version__) >= LooseVersion('1.10.0'):
-            tensor = tensor.to(torch.uint8)
-        return to_dlpack(tensor)
+    # TODO: Current DLPack doesn't support bool and PyTorch disables converting bool tensor to DLPack in recent commit.
+    # https://github.com/pytorch/pytorch/blob/7e7be526c9d9179f35084e9cca5b5c5ad5172100/aten/src/ATen/DLConvertor.cpp#L41
+    # We need to convert bool tensor to unit8 tensor to workaround this.
+    # DLPack is discussing how to support bool type, we can remove this workaround once both DLPack
+    # and PyTorch support bool type.
+    if not tensor.is_contiguous():
+        raise ORTModuleIOError(
+            "Only contiguous tensors are supported.")
+    if tensor.dtype == torch.bool and LooseVersion(torch.__version__) >= LooseVersion('1.10.0'):
+        tensor = tensor.to(torch.uint8)
+    return to_dlpack(tensor)
 
 
 def _check_same_device(device, argument_str, *args):
@@ -343,7 +361,7 @@ def reinitialize_graph_execution_manager(graph_execution_manager):
     # Re-define the torch allocator
     graph_execution_manager._get_torch_gpu_allocator_function_addresses()
 
-    # Load ATenOp executor extension.
+    # Load ATen op executor extension.
     load_aten_op_executor_cpp_extension()
 
 def reinitialize_training_manager(training_manager):

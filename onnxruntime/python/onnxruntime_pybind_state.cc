@@ -27,6 +27,7 @@
 #include "core/session/abi_session_options_impl.h"
 #include "core/session/onnxruntime_session_options_config_keys.h"
 #include "core/session/provider_bridge_ort.h"
+#include "core/providers/tensorrt/tensorrt_provider_options.h"
 
 // Explicitly provide a definition for the static const var 'GPU' in the OrtDevice struct,
 // GCC 4.x doesn't seem to define this and it breaks the pipelines based on CentOS as it uses
@@ -55,7 +56,16 @@ namespace py = pybind11;
 using namespace onnxruntime;
 using namespace onnxruntime::logging;
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma warning(push)
+// "Global initializer calls a non-constexpr function." Therefore you can't use ORT APIs in the other global initializers.
+// TODO: we may delay-init this variable
+#pragma warning(disable : 26426)
+#endif
 static Env& platform_env = Env::Default();
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma warning(push)
+#endif
 
 #if !defined(ORT_MINIMAL_BUILD) || defined(ORT_MINIMAL_BUILD_CUSTOM_OPS)
 // Custom op section starts
@@ -202,15 +212,15 @@ py::object GetPyObjectFromSparseTensor(size_t pos, const OrtValue& ort_value, co
     if (!data_transfer_manager) {
       LOGS(logger, WARNING) << "Returned OrtValue with sparse tensor at position: " << pos << " is on GPU but no data_transfer_manager provided."
                             << " Returned it will have its data on GPU, you can copy it using numpy_array_to_cpu()";
-      py_sparse_tensor.reset(new PySparseTensor(ort_value));
+      py_sparse_tensor = std::make_unique<PySparseTensor>(ort_value);
     } else {
       auto dst_sparse_tensor = std::make_unique<SparseTensor>(src_sparse_tensor.DataType(), src_sparse_tensor.DenseShape(), GetAllocator());
       auto status = src_sparse_tensor.Copy(*data_transfer_manager, 0, *dst_sparse_tensor);
       OrtPybindThrowIfError(status);
-      py_sparse_tensor.reset(new PySparseTensor(std::move(dst_sparse_tensor)));
+      py_sparse_tensor = std::make_unique<PySparseTensor>(std::move(dst_sparse_tensor));
     }
   } else {
-    py_sparse_tensor.reset(new PySparseTensor(ort_value));
+    py_sparse_tensor = std::make_unique<PySparseTensor>(ort_value);
   }
 
   py::object result = py::cast(py_sparse_tensor.get(), py::return_value_policy::take_ownership);
@@ -365,7 +375,7 @@ std::unique_ptr<IExecutionProvider> CreateExecutionProviderInstance(
       std::string calibration_table, cache_path, lib_path;
       auto it = provider_options_map.find(type);
       if (it != provider_options_map.end()) {
-        OrtTensorRTProviderOptions params{
+        OrtTensorRTProviderOptionsV2 params{
             0,
             0,
             nullptr,
@@ -637,6 +647,16 @@ std::unique_ptr<IExecutionProvider> CreateExecutionProviderInstance(
     nuphar_settings.clear();
     return p;
 #endif
+  } else if (type == kTvmExecutionProvider) {
+#if USE_TVM
+    onnxruntime::tvm::TvmEPOptions info{};
+    const auto it = provider_options_map.find(type);
+    if (it != provider_options_map.end()) {
+      info = onnxruntime::tvm::TvmEPOptionsHelper::FromProviderOptions(it->second);
+    }
+
+    return onnxruntime::CreateExecutionProviderFactory_Tvm(info)->CreateProvider();
+#endif
   } else if (type == kVitisAIExecutionProvider) {
 #if USE_VITISAI
     // Retrieve Vitis AI provider options
@@ -809,9 +829,9 @@ void InitializeSession(InferenceSession* sess,
 
   ep_registration_fn(sess, provider_types, provider_options_map);
 
-#if !defined(ORT_MINIMAL_BUILD)
+#if !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
   if (!disabled_optimizer_names.empty()) {
-    OrtPybindThrowIfError(sess->FilterEnabledOptimizers(disabled_optimizer_names));
+    OrtPybindThrowIfError(sess->FilterEnabledOptimizers({disabled_optimizer_names.cbegin(), disabled_optimizer_names.cend()}));
   }
 #else
   ORT_UNUSED_PARAMETER(disabled_optimizer_names);
@@ -867,6 +887,13 @@ void addGlobalMethods(py::module& m, Environment& env) {
         default_logging_manager->SetDefaultLoggerSeverity(static_cast<logging::Severity>(severity));
       },
       "Sets the default logging severity. 0:Verbose, 1:Info, 2:Warning, 3:Error, 4:Fatal");
+  m.def(
+      "set_default_logger_verbosity", [&env](int vlog_level) {
+        logging::LoggingManager* default_logging_manager = env.GetLoggingManager();
+        default_logging_manager->SetDefaultLoggerVerbosity(vlog_level);
+      },
+      "Sets the default logging verbosity level. To activate the verbose log, "
+      "you need to set the default logging severity to 0:Verbose level.");
   m.def(
       "get_all_providers", []() -> const std::vector<std::string>& { return GetAllExecutionProviderNames(); },
       "Return list of Execution Providers that this version of Onnxruntime can support. "
@@ -1218,7 +1245,27 @@ RunOptions instance. The individual calls will exit gracefully and return an err
                      R"pbdoc(Choose to run in training or inferencing mode)pbdoc")
 #endif
       .def_readwrite("only_execute_path_to_fetches", &RunOptions::only_execute_path_to_fetches,
-                     R"pbdoc(Only execute the nodes needed by fetch list)pbdoc");
+                     R"pbdoc(Only execute the nodes needed by fetch list)pbdoc")
+      .def(
+          "add_run_config_entry",
+          [](RunOptions* options, const char* config_key, const char* config_value) -> void {
+            //config_key and config_value will be copied
+            const Status status = options->config_options.AddConfigEntry(config_key, config_value);
+            if (!status.IsOK())
+              throw std::runtime_error(status.ErrorMessage());
+          },
+          R"pbdoc(Set a single run configuration entry as a pair of strings.)pbdoc")
+      .def(
+          "get_run_config_entry",
+          [](const RunOptions* options, const char* config_key) -> std::string {
+            const std::string key(config_key);
+            std::string value;
+            if (!options->config_options.TryGetConfigEntry(key, value))
+              throw std::runtime_error("RunOptions does not have configuration with key: " + key);
+
+            return value;
+          },
+          R"pbdoc(Get a single run configuration value using the given configuration key.)pbdoc");
 
   py::class_<ModelMetadata>(m, "ModelMetadata", R"pbdoc(Pre-defined and custom metadata about the model.
 It is usually used to identify the model used to run the prediction and
@@ -1291,7 +1338,7 @@ including arg name, arg type (contains both type and shape).)pbdoc")
           },
           "node shape (assuming the node holds a tensor)");
 
-  py::class_<SessionObjectInitializer>(m, "SessionObjectInitializer");
+  py::class_<SessionObjectInitializer> sessionObjectInitializer(m, "SessionObjectInitializer");
   py::class_<PyInferenceSession>(m, "InferenceSession", R"pbdoc(This is the main class used to run a model.)pbdoc")
       // In Python3, a Python bytes object will be passed to C++ functions that accept std::string or char*
       // without any conversion. So this init method can be used for model file path (string) and model content (bytes)
@@ -1484,61 +1531,9 @@ including arg name, arg type (contains both type and shape).)pbdoc")
       .export_values();
 }
 
-#if defined(USE_MIMALLOC_ARENA_ALLOCATOR)
-static struct {
-  PyMemAllocatorEx mem;
-  PyMemAllocatorEx raw;
-  PyMemAllocatorEx obj;
-} allocators;
-#endif
-
 void CreateInferencePybindStateModule(py::module& m) {
   m.doc() = "pybind11 stateful interface to ONNX runtime";
   RegisterExceptions(m);
-
-#if defined(USE_MIMALLOC_ARENA_ALLOCATOR)
-  PyMemAllocatorEx alloc;
-  alloc.malloc = [](void* ctx, size_t size) {
-    ORT_UNUSED_PARAMETER(ctx);
-    return mi_malloc(size);
-  };
-
-  alloc.calloc = [](void* ctx, size_t nelem, size_t elsize) {
-    ORT_UNUSED_PARAMETER(ctx);
-    return mi_calloc(nelem, elsize);
-  };
-
-  alloc.realloc = [](void* ctx, void* ptr, size_t new_size) {
-    if (mi_is_in_heap_region(ptr)) {
-      return mi_realloc(ptr, new_size);
-    } else {
-      PyMemAllocatorEx* a = (PyMemAllocatorEx*)ctx;
-      return a->realloc(ctx, ptr, new_size);
-    }
-  };
-
-  alloc.free = [](void* ctx, void* ptr) {
-    if (mi_is_in_heap_region(ptr)) {
-      mi_free(ptr);
-    } else {
-      PyMemAllocatorEx* a = (PyMemAllocatorEx*)ctx;
-      a->free(ctx, ptr);
-    }
-  };
-
-  alloc.ctx = &allocators.raw;
-  PyMem_GetAllocator(PYMEM_DOMAIN_RAW, &allocators.raw);
-  PyMem_SetAllocator(PYMEM_DOMAIN_RAW, &alloc);
-
-  alloc.ctx = &allocators.mem;
-  PyMem_GetAllocator(PYMEM_DOMAIN_MEM, &allocators.mem);
-  PyMem_SetAllocator(PYMEM_DOMAIN_MEM, &alloc);
-
-  alloc.ctx = &allocators.obj;
-  PyMem_GetAllocator(PYMEM_DOMAIN_OBJ, &allocators.obj);
-  PyMem_SetAllocator(PYMEM_DOMAIN_OBJ, &alloc);
-
-#endif
 
   // Initialization of the module
   ([]() -> void {
@@ -1554,9 +1549,7 @@ void CreateInferencePybindStateModule(py::module& m) {
   addSparseTensorMethods(m);
   addIoBindingMethods(m);
 
-#if !defined(__APPLE__) && \
-    (!defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD) || defined(ORT_MINIMAL_BUILD_CUSTOM_OPS))
-  Ort::SessionOptions tmp_options;
+#if !defined(__APPLE__) && !defined(ORT_MINIMAL_BUILD)
   if (!InitProvidersSharedLibrary()) {
     const logging::Logger& default_logger = logging::LoggingManager::DefaultLogger();
     LOGS(default_logger, WARNING) << "Init provider bridge failed.";
@@ -1586,7 +1579,7 @@ void InitializeEnv() {
     InitArray();
     Env::Default().GetTelemetryProvider().SetLanguageProjection(OrtLanguageProjection::ORT_PROJECTION_PYTHON);
     OrtPybindThrowIfError(Environment::Create(std::make_unique<LoggingManager>(
-                                                  std::unique_ptr<ISink>{new CLogSink{}},
+                                                  std::make_unique<CLogSink>(),
                                                   Severity::kWARNING, false, LoggingManager::InstanceType::Default,
                                                   &SessionObjectInitializer::default_logger_id),
                                               session_env));
