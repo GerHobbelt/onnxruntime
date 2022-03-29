@@ -25,7 +25,25 @@ class NeuralNet(nn.Module):
         out = self.fc2(out)
         return out
 
+class NoOpNet(torch.nn.Module):
+    def __init__(self):
+        super(NoOpNet, self).__init__()
+        self.dummy_weight = torch.nn.Parameter(
+            torch.ones(128, 128, dtype=torch.float16))
+
+    def forward(self, input):
+        return input
+
 class OrtModuleEagerTest(unittest.TestCase):
+    def test_half_type(self):
+        model = NoOpNet()
+        device = torch.device('ort')
+        model.to(device)
+        model = ORTModule(model)
+        input = torch.ones(2,2).to(torch.float16)
+        y = model(input.to(device))
+        assert(y.dtype == torch.float16)
+
     def test_ort_module_and_eager_mode(self):
         input_size = 784
         hidden_size = 500
@@ -50,6 +68,8 @@ class OrtModuleEagerTest(unittest.TestCase):
         #reload initial state
         model.load_state_dict(initial_state)
         #run on ort with ORTModule and eager mode
+        #use device_idx 1 to test non-zero device
+        torch_ort_eager.set_device(1, 'CPUExecutionProvider', {'dummy':'dummy'})
         device = torch.device('ort', index=0)
         model.to(device)
         model = ORTModule(model)
