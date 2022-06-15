@@ -87,7 +87,7 @@ static common::Status DeserializeTensorProto(const Env& env, const std::basic_st
     }
   }
 
-  if (strcmp(p_tensor->Location().name, CPU) == 0) {
+  if (p_tensor->Location().device.Type() == OrtDevice::CPU) {
     // deserialize directly to CPU tensor
     ORT_RETURN_IF_ERROR(utils::TensorProtoToTensor(env, proto_path.c_str(), tensor_proto, *p_tensor));
   } else {  // non-cpu tensor
@@ -169,7 +169,7 @@ common::Status SaveInitializedTensors(
     return retval;
   };
 
-  //1. first plan the memory
+  // 1. first plan the memory
   const onnxruntime::InitializedTensorSet& initialized_tensor_set = graph.GetAllInitializedTensors();
   std::unordered_map<int, const ONNX_NAMESPACE::TensorProto*> id_to_initialized_tensor;
   std::set<int> user_supplied_initializer_ids;  // set containing the ort value ids of all user supplied initializers
@@ -203,9 +203,9 @@ common::Status SaveInitializedTensors(
     }
     ORT_RETURN_IF_ERROR(planner.Trace(entry.first, entry.second));
   }
-  //2. allocate weight buffer on different locations
-  // planned_initializers_memory_size_in_byte is not actual physical size.
-  // It's the virtual size computed by planner.
+  // 2. allocate weight buffer on different locations
+  //  planned_initializers_memory_size_in_byte is not actual physical size.
+  //  It's the virtual size computed by planner.
   std::unordered_map<std::string, size_t> planned_initializers_memory_sizes_in_byte;
   ORT_RETURN_IF_ERROR(
       planner.FinalizePlan(planned_initializers_memory_sizes_in_byte));
@@ -222,7 +222,7 @@ common::Status SaveInitializedTensors(
 
   OrtCallback deleter{nullptr, nullptr};
 
-  //3. create weight tensors based on weights buffer
+  // 3. create weight tensors based on weights buffer
   for (const auto& entry : id_to_initialized_tensor) {
     int ort_value_index = entry.first;
     const char* name = (entry.second->name().empty()) ? "" : entry.second->name().c_str();
@@ -321,10 +321,20 @@ common::Status SaveInputOutputNamesToNodeMapping(const onnxruntime::GraphViewer&
     // implicit inputs to a node could come directly from a feed, so we need to make sure they have an entry too
     const auto& node_implicit_inputs = node.ImplicitInputDefs();
     if (!node_implicit_inputs.empty()) {
+      // In the main graph, the location of the implicit input(s) is the location it
+      // is consumed in the main graph if there is an explicit consumer.
+      // If the only consumer(s) are implicit consumers (i.e.) other control flow nodes and
+      // all of them have been partitioned to the same EP, its location is the
+      // location of the non-CPU device corresponding to the EP.
+      // If multiple EPs are involved, then the planned location for such implicit inputs
+      // just default to CPU (as there is ambiguity involved as to which non-CPU device is
+      // most optimal)
+
       // In nested subgraphs, the location of the implicit input(s) is the location it
       // is consumed in the subgraph if there is an explicit consumer.
       // If the only consumer(s) are implicit consumers (i.e.) other control flow nodes, its
       // location is the location of the value in the enclosing outer scope.
+
       // All this is setup in the planner, we just use the location from the plan here.
       for (const auto& input_def : node_implicit_inputs) {
         int arg_index;

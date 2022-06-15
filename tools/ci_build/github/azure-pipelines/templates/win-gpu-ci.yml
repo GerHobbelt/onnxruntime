@@ -41,6 +41,9 @@ parameters:
   
 - name: ORT_EP_NAME
   type: string
+  
+- name: MachinePool
+  type: string
 
 - name: DocUpdateNeeded
   displayName: Run Tests?
@@ -58,7 +61,7 @@ jobs:
     DocUpdateNeeded: ${{ parameters.DocUpdateNeeded }}    
   workspace:
     clean: all
-  pool: 'Win-GPU-2019'
+  pool: ${{ parameters.MachinePool }}
   timeoutInMinutes:  300  
   steps:
   - task: UsePythonVersion@0
@@ -69,7 +72,7 @@ jobs:
 
   - task: NodeTool@0
     inputs:
-      versionSpec: '12.x'
+      versionSpec: '16.x'
       force32bit: ${{ parameters.isX86 }}
 
   # Our build machine doesn't have java x86
@@ -115,7 +118,7 @@ jobs:
 
       - ${{ if eq(parameters.isTraining, true) }}:
           - script: |
-             python -m pip install -r $(Build.SourcesDirectory)\tools\ci_build\github\linux\docker\scripts\training\ortmodule\stage1\requirements_torch1.9.0_cu11.1.txt
+             python -m pip install -r $(Build.SourcesDirectory)\tools\ci_build\github\linux\docker\scripts\training\ortmodule\stage1\requirements_torch1.11.0_cu11.3\requirements.txt
              python -m pip install -r $(Build.SourcesDirectory)\tools\ci_build\github\linux\docker\scripts\training\requirements.txt
             workingDirectory: '$(Build.BinariesDirectory)'
             displayName: 'Install python modules'

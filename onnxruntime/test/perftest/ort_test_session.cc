@@ -1,4 +1,5 @@
 #include "ort_test_session.h"
+#include <set>
 #include <core/session/onnxruntime_cxx_api.h>
 #include "core/session/onnxruntime_session_options_config_keys.h"
 #include "core/providers/tensorrt/tensorrt_provider_options.h"
@@ -248,7 +249,7 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
     size_t num_of_threads = 8;             // [num_of_threads]: Overrides the accelerator default value of number of threads with this value at runtime.
     bool use_compiled_network = false;     // [use_compiled_network]: Can be enabled to directly import pre-compiled blobs if exists.
     std::string blob_dump_path = "";       // [blob_dump_path]: Explicitly specify the path where you would like to dump and load the blobs for the use_compiled_network(save/load blob) feature. This overrides the default path.
-
+    bool enable_opencl_throttling = false;    // [enable_opencl_throttling]: Enables OpenCL queue throttling for GPU device (Reduces CPU Utilization when using GPU)
 #ifdef _MSC_VER
     std::string ov_string = ToUTF8String(performance_test_config.run_config.ep_runtime_config_string);
 #else
@@ -299,6 +300,14 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
         } else {
           ORT_THROW("[ERROR] [OpenVINO] The value for the key 'use_compiled_network' should be a boolean i.e. true or false. Default value is false.\n");
         }
+      } else if (key == "enable_opencl_throttling") {
+        if (value == "true" || value == "True") {
+          enable_opencl_throttling = true;
+        } else if (value == "false" || value == "False") {
+          enable_opencl_throttling = false;
+        } else {
+          ORT_THROW("[ERROR] [OpenVINO] The value for the key 'enable_opencl_throttling' should be a boolean i.e. true or false. Default value is false.\n");
+        }
       } else if (key == "num_of_threads") {
         std::stringstream sstream(value);
         sstream >> num_of_threads;
@@ -308,7 +317,7 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
       } else if (key == "blob_dump_path") {
         blob_dump_path = value;
       } else {
-        ORT_THROW("[ERROR] [OpenVINO] wrong key type entered. Choose from the following runtime key options that are available for OpenVINO. ['device_type', 'device_id', 'enable_vpu_fast_compile', 'num_of_threads', 'use_compiled_network', 'blob_dump_path'] \n");
+        ORT_THROW("[ERROR] [OpenVINO] wrong key type entered. Choose from the following runtime key options that are available for OpenVINO. ['device_type', 'device_id', 'enable_vpu_fast_compile', 'num_of_threads', 'use_compiled_network', 'blob_dump_path', 'enable_opencl_throttling|true'] \n");
       }
     }
     OrtOpenVINOProviderOptions options;
@@ -318,9 +327,70 @@ OnnxRuntimeTestSession::OnnxRuntimeTestSession(Ort::Env& env, std::random_device
     options.num_of_threads = num_of_threads;                    // To set number of free InferRequests, default is 8
     options.use_compiled_network = use_compiled_network;        // To use_compiled_network, default is false
     options.blob_dump_path = blob_dump_path.c_str();            // sets the blob_dump_path, default is ""
+    options.enable_opencl_throttling = enable_opencl_throttling;      // Enables GPU Throttling (Reduces CPU Utilization)
     session_options.AppendExecutionProvider_OpenVINO(options);
 #else
     ORT_THROW("OpenVINO is not supported in this build\n");
+#endif
+  } else if (provider_name == onnxruntime::kSnpeExecutionProvider) {
+#ifdef USE_SNPE
+#ifdef _MSC_VER
+    std::string option_string = ToUTF8String(performance_test_config.run_config.ep_runtime_config_string);
+#else
+    std::string option_string = performance_test_config.run_config.ep_runtime_config_string;
+#endif
+    std::istringstream ss(option_string);
+    std::string token;
+
+    std::vector<const char*> snpe_option_keys;
+    std::vector<const char*> snpe_option_values;
+    std::vector<std::string> values;
+
+    while (ss >> token) {
+      if (token == "") {
+        continue;
+      }
+      auto pos = token.find("|");
+      if (pos == std::string::npos || pos == 0 || pos == token.length()) {
+        ORT_THROW("Use a '|' to separate the key and value for the run-time option you are trying to use.\n");
+      }
+
+      std::string key(token.substr(0, pos));
+      std::string value(token.substr(pos + 1));
+
+      if (key == "runtime") {
+        std::set<std::string> supported_runtime = {"CPU", "GPU_FP32", "GPU", "GPU_FLOAT16", "DSP", "AIP_FIXED_TF"};
+        if (supported_runtime.find(value) != supported_runtime.end()) {
+          snpe_option_keys.push_back("runtime");
+          values.push_back(value);
+        } else {
+          ORT_THROW(R"(Wrong configuration value for the key 'runtime'. 
+select from 'CPU', 'GPU_FP32', 'GPU', 'GPU_FLOAT16', 'DSP', 'AIP_FIXED_TF'. \n)");
+        }
+      } else if (key == "priority") {
+        snpe_option_keys.push_back("priority");
+        values.push_back(value);
+      } else if (key == "buffer_type") {
+        std::set<std::string> supported_buffer_type = {"TF8", "TF16", "UINT8", "FLOAT", "ITENSOR"};
+        if (supported_buffer_type.find(value) != supported_buffer_type.end()) {
+          snpe_option_keys.push_back("buffer_type");
+          values.push_back(value);
+        } else {
+          ORT_THROW(R"(Wrong configuration value for the key 'buffer_type'. 
+select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
+        }
+      } else {
+        ORT_THROW("Wrong key type entered. Choose from options: ['runtime', 'priority', 'buffer_type'] \n");
+      }
+    }
+    for (auto& it : values) {
+      snpe_option_values.push_back(it.c_str());
+    }
+    session_options.AppendExecutionProvider_SNPE(snpe_option_keys.data(),
+                                                 snpe_option_values.data(),
+                                                 snpe_option_keys.size());
+#else
+    ORT_THROW("SNPE is not supported in this build\n");
 #endif
   } else if (provider_name == onnxruntime::kNnapiExecutionProvider) {
 #ifdef USE_NNAPI

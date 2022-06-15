@@ -84,12 +84,13 @@ class CUDAExecutionProvider : public IExecutionProvider {
   int GetCudnnConvAlgo() const { return info_.cudnn_conv_algo_search; }
   bool DoCopyOnDefaultStream() const { return info_.do_copy_in_default_stream; }
   bool GetCudnnConvUseMaxWorkspace() const { return info_.cudnn_conv_use_max_workspace; }
+  bool GetCudnnConv1dPadToNc1d() const { return info_.cudnn_conv1d_pad_to_nc1d; }
 
   ProviderOptions GetProviderOptions() const override {
     return CUDAExecutionProviderInfo::ToProviderOptions(info_);
   }
 
-  void RegisterAllocator(std::shared_ptr<AllocatorManager> allocator_manager) override;
+  void RegisterAllocator(AllocatorManager& allocator_manager) override;
   static AllocatorPtr CreateCudaAllocator(OrtDevice::DeviceId device_id, size_t cuda_mem_limit, ArenaExtendStrategy arena_extend_strategy,
                                           CUDAExecutionProviderExternalAllocatorInfo external_alloc_info, OrtArenaCfg* arena_cfg);
 

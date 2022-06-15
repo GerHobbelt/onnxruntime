@@ -967,41 +967,35 @@ static void PermuteInput(api::GraphRef& graph, api::NodeRef& node, size_t i, con
   node.SetInput(i, gather_output);
 }
 
-// static bool HandleResize(HandlerArgs& args) {
-//  auto inputs = args.node.Inputs();
-//  int64_t rank_int = gsl::narrow_cast<int64_t>(args.perm.size());
-//
-//  auto p = ChannelFirstToLastPerm(rank_int);
-//  auto& perm = p == args.perm ? args.perm : args.perm_inv;
-//  auto& perm_inv = p == args.perm ? args.perm_inv : args.perm;
-//
-//  if (args.ctx.opset < 11) {
-//     PermuteInput(args.ctx.graph, args.node, 1, perm);
-//   } else {
-//     if (inputs[1] != "") {
-//       std::vector<int64_t> double_perm_inv = perm;
-//       double_perm_inv.reserve(2 * args.perm.size());
-//       for (int64_t p1 : perm) {
-//         double_perm_inv.push_back(p1 + rank_int);
-//       }
-//       PermuteInput(args.ctx.graph, args.node, 1, double_perm_inv);
-//     }
-//     for (size_t i = 2; i < inputs.size(); ++i) {
-//       if (inputs[i] != "") {
-//         PermuteInput(args.ctx.graph, args.node, i, perm);
-//       }
-//     }
-//   }
-//
-//   TransposeFirstInput(args.ctx, args.node, perm);
-//   TransposeOutputs(args.ctx, args.node, perm_inv);
-//
-//   SwapNodeOpTypeAndDomain(args.ctx.graph, args.node, args.node.OpType(), "com.microsoft.nhwc");
-//
-//   return true;
-// }
+static bool HandleResize(HandlerArgs& args) {
+  auto inputs = args.node.Inputs();
+  int64_t rank_int = gsl::narrow_cast<int64_t>(args.perm.size());
 
-// constexpr HandlerInfo resize_handler = {&FirstInput, &HandleResize};
+  if (args.ctx.opset < 11) {
+    PermuteInput(args.ctx.graph, args.node, 1, args.perm_inv);
+  } else {
+    if (inputs[1] != "") {
+      std::vector<int64_t> double_perm_inv = args.perm_inv;
+      double_perm_inv.reserve(2 * args.perm_inv.size());
+      for (int64_t p : args.perm_inv) {
+        double_perm_inv.push_back(p + rank_int);
+      }
+      PermuteInput(args.ctx.graph, args.node, 1, double_perm_inv);
+    }
+    for (size_t i = 2; i < inputs.size(); ++i) {
+      if (inputs[i] != "") {
+        PermuteInput(args.ctx.graph, args.node, i, args.perm_inv);
+      }
+    }
+  }
+
+  TransposeFirstInput(args.ctx, args.node, args.perm_inv);
+  TransposeOutputs(args.ctx, args.node, args.perm);
+
+  return true;
+}
+
+constexpr HandlerInfo resize_handler = {&FirstInput, &HandleResize};
 
 static bool HandlePad(HandlerArgs& args) {
   size_t rank = args.perm.size();
@@ -1697,9 +1691,7 @@ static const std::unordered_map<std::string_view, const HandlerInfo&> handler_ma
     {"Split", split_handler},
     {"Shape", shape_handler},
     {"Pad", pad_handler},
-    // Todo: renable resize handler after adding NHWC support in upsample op on cpu
-    // https://github.com/microsoft/onnxruntime/issues/9857
-    //  {"Resize", resize_handler},
+    {"Resize", resize_handler},
     {"ReduceSum", reduce_sum_handler},
 
     {"ReduceLogSum", reduce_op_handler},
@@ -1884,12 +1876,31 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
   }
 
   bool changed = false;
+  bool have_dq = false;
+  // if nodes are assigned we only process those that match the EP in the context
+  bool ignore_assigned_nodes = ctx.provider_type.empty();
+
   // Optimize graph. Nodes will be modified during iteration, but nodes are never deleted before we reach them.
   // New transpose nodes are inserted, but always as an input to an existing node.
   for (size_t i = 0; i < nodes.size(); ++i) {
     api::NodeRef& node = *nodes[i];
+    if (node.OpType() == "DequantizeLinear") {
+      have_dq = true;
+    }
+
+    // it's not clear how we should handle assignment of new Transpose nodes created during optimization, so ignore.
+    // e.g. we may need to transpose the input of a node we move a Transpose past. if that node is assigned to
+    // an EP that doesn't support Transpose, the new node should use the CPU EP. but if that node is assigned to
+    // an EP that does support the Transpose we should assign the new node to that EP.
+    // as we do not know what each EP supports, it's safer to not optimize in order to maintain the EP assignments
+    // made during partitioning.
+    if (ignore_assigned_nodes && !node.GetExecutionProviderType().empty()) {
+      continue;
+    }
+
     if (ctx.mode == OptimizerMode::OPTIMIZE_LAYOUT_TRANSFORM &&
-        ctx.layout_sensitive_ops.count(node.OpType()) && node.GetExecutionProviderType() != ctx.provider_type) {
+        ctx.layout_sensitive_ops.count(node.OpType()) &&
+        node.GetExecutionProviderType() != ctx.provider_type) {
       // If the current op is layout sensitive and it is not assigned to the given provider
       // then do not process transpose.
       continue;
@@ -1915,21 +1926,27 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
     }
   }
 
-  // Currently limiting the second optimization pass to layout transform mode
-  // TODO: Enable this for both the modes.
-  if (ctx.mode == OptimizerMode::OPTIMIZE_TRANSPOSE) {
+  if (!have_dq) {
     result.graph_modified = changed;
     return result;
   }
 
   // Run second optimization pass.
-  // If any transpose succeeds a DQ node, move it above the DQ node.
-  // In case of QDQ models this helps to preserve the QDQ node unit
+  // If any transpose succeeds a DQ node, move it above the DQ node if it's not part of a QDQ node group.
+  // In QDQ models this helps to preserve the QDQ node group when a Transpose was pushed across a DQ into
+  // an existing QDQ node group.
   // In all other scenarios this is beneficial as well because moving transpose above DQ node is more efficient as
   // transpose node now handles less data.
   auto graph_nodes = ctx.graph.Nodes();
   for (size_t i = 1; i < graph_nodes.size(); i++) {
-    if (graph_nodes[i]->OpType() == "Transpose") {
+    const auto& node = *graph_nodes[i];
+
+    // TODO: if we want to handle this we need to propagate the assigned EP to the new Transpose node.
+    if (ignore_assigned_nodes && !node.GetExecutionProviderType().empty()) {
+      continue;
+    }
+
+    if (node.OpType() == "Transpose") {
       auto& transpose_node = *graph_nodes[i];
       auto dq_node = ctx.graph.GetNodeProducingOutput(transpose_node.Inputs()[0]);
       if (!dq_node || dq_node->OpType() != "DequantizeLinear") {
@@ -1937,11 +1954,11 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
       }
 
       auto consumers = ctx.graph.GetValueConsumers(transpose_node.Outputs()[0]);
-      bool is_part_of_qdq_unit = std::find_if(consumers->nodes.cbegin(), consumers->nodes.cend(),
-                                              [](const std::unique_ptr<api::NodeRef>& node) {
-                                                return node->OpType() == "QuantizeLinear";
-                                              }) != consumers->nodes.cend();
-      if (is_part_of_qdq_unit) {
+      bool is_part_of_qdq_group = std::find_if(consumers->nodes.cbegin(), consumers->nodes.cend(),
+                                               [](const std::unique_ptr<api::NodeRef>& node) {
+                                                 return node->OpType() == "QuantizeLinear";
+                                               }) != consumers->nodes.cend();
+      if (is_part_of_qdq_group) {
         continue;
       }
 
@@ -1950,9 +1967,11 @@ OptimizeResult OptimizeImpl(OptimizerCtx& ctx) {
       if (!perm.has_value()) {
         continue;
       }
+
       if (!HandleQuantizeDequantizeScale(ctx.graph, *perm, *dq_node, ctx.opset)) {
         continue;
       }
+
       TransposeFirstInput(ctx, *dq_node, *perm);
 
       // remove existing transpose node
@@ -1971,7 +1990,8 @@ const std::unordered_set<std::string_view>& GetLayoutSensitiveOps() {
   // List of all layout sensitive ops defined in ONNX standard.
   static std::unordered_set<std::string_view> layout_sensitive_ops = {"Conv", "QLinearConv", "BatchNormalization",
                                                                       "AveragePool", "GlobalAveragePool", "MaxPool",
-                                                                      "GlobalMaxPool", "LRN", "GridSample"};
+                                                                      "GlobalMaxPool", "LRN", "GridSample",
+                                                                      "DepthToSpace", "SpaceToDepth"};
 
   return layout_sensitive_ops;
 }
