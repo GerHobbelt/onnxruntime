@@ -1049,7 +1049,7 @@ endif()
 
 set(onnxruntime_LINK_DIRS )
 if (onnxruntime_USE_CUDA)
-      #TODO: combine onnxruntime_CUDNN_HOME and onnxruntime_CUDA_HOME, assume they are the same
+      # do not combine onnxruntime_CUDNN_HOME and onnxruntime_CUDA_HOME; install locations are different
       if (WIN32)
         if(onnxruntime_CUDNN_HOME)
           list(APPEND onnxruntime_LINK_DIRS ${onnxruntime_CUDNN_HOME}/lib ${onnxruntime_CUDNN_HOME}/lib/x64)
