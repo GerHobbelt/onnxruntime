@@ -536,7 +536,7 @@ if (onnxruntime_USE_CUDA)
 
   install(TARGETS onnxruntime_providers_cuda
           ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
-          LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+          LIBRARY  DESTINATION "$<IF:$<BOOL:${WIN32}>,${CMAKE_INSTALL_BINDIR},${CMAKE_INSTALL_LIBDIR}>"
           RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 endif()
@@ -714,7 +714,7 @@ if (onnxruntime_USE_TENSORRT)
 
   install(TARGETS onnxruntime_providers_tensorrt
           ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
-          LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+          LIBRARY  DESTINATION "$<IF:$<BOOL:${WIN32}>,${CMAKE_INSTALL_BINDIR},${CMAKE_INSTALL_LIBDIR}>"
           RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
@@ -1084,6 +1084,12 @@ if (onnxruntime_USE_DML)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${DML_PACKAGE_DIR}/bin/${onnxruntime_target_platform}-win/${file}" $<TARGET_FILE_DIR:onnxruntime_providers_dml>)
     endforeach()
+    install(
+      FILES
+        "${DML_PACKAGE_DIR}/bin/${onnxruntime_target_platform}-win/DirectML$<$<CONFIG:Debug>:.Debug>.dll"
+        #"${DML_PACKAGE_DIR}/bin/${onnxruntime_target_platform}-win/DirectML$<$<CONFIG:Debug>:.Debug>.pdb"
+      DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
   endif()
 
   function(target_add_dml target)
