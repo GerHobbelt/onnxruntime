@@ -109,3 +109,8 @@ if (NOT onnxruntime_BUILD_SHARED_LIB)
 endif()
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/framework  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/onnxruntime/core)
+install(
+  DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/framework/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING PATTERN "provider_options.h"
+)
