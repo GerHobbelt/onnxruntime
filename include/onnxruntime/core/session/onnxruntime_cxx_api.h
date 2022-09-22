@@ -76,7 +76,7 @@ struct Global {
 template <typename T>
 #ifdef ORT_API_MANUAL_INIT
 const OrtApi* Global<T>::api_{};
-inline void InitApi() { Global<void>::api_ = OrtGetApiBase()->GetApi(ORT_API_VERSION); }
+inline void InitApi() NO_EXCEPTION { Global<void>::api_ = OrtGetApiBase()->GetApi(ORT_API_VERSION); }
 #else
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma warning(push)
@@ -91,7 +91,7 @@ const OrtApi* Global<T>::api_ = OrtGetApiBase()->GetApi(ORT_API_VERSION);
 #endif
 
 /// This returns a reference to the OrtApi interface in use
-inline const OrtApi& GetApi() { return *Global<void>::api_; }
+inline const OrtApi& GetApi() NO_EXCEPTION { return *Global<void>::api_; }
 
 /// This is a C++ wrapper for OrtApi::GetAvailableProviders() and returns a vector of strings representing the available execution providers.
 std::vector<std::string> GetAvailableProviders();
