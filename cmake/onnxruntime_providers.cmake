@@ -302,6 +302,11 @@ if (onnxruntime_ENABLE_TRAINING)
 endif()
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/providers/cpu  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/onnxruntime/core/providers)
+install(
+  DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/providers/cpu/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING PATTERN "*.h"
+)
 set_target_properties(onnxruntime_providers PROPERTIES LINKER_LANGUAGE CXX)
 set_target_properties(onnxruntime_providers PROPERTIES FOLDER "ONNXRuntime")
 
@@ -538,7 +543,11 @@ if (onnxruntime_USE_CUDA)
           ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
           LIBRARY  DESTINATION "$<IF:$<BOOL:${WIN32}>,${CMAKE_INSTALL_BINDIR},${CMAKE_INSTALL_LIBDIR}>"
           RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR})
-
+  install(
+    DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/providers/cuda/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h"
+  )
 endif()
 
 if (onnxruntime_USE_DNNL)
@@ -683,6 +692,11 @@ if (onnxruntime_USE_TENSORRT)
   endif()
   # ${CMAKE_CURRENT_BINARY_DIR} is so that #include "onnxruntime_config.h" inside tensor_shape.h is found
   install(DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/providers/tensorrt  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/onnxruntime/core/providers)
+  install(
+    DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/providers/tensorrt/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h"
+  )
   set_target_properties(onnxruntime_providers_tensorrt PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(onnxruntime_providers_tensorrt PROPERTIES FOLDER "ONNXRuntime")
   target_compile_definitions(onnxruntime_providers_tensorrt PRIVATE ONNXIFI_BUILD_LIBRARY=1)
@@ -1137,7 +1151,11 @@ if (onnxruntime_USE_DML)
   install(DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/providers/dml
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/onnxruntime/core/providers
   )
-
+  install(
+    DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/providers/dml/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h"
+  )
   set_target_properties(onnxruntime_providers_dml PROPERTIES LINKER_LANGUAGE CXX)
   set_target_properties(onnxruntime_providers_dml PROPERTIES FOLDER "ONNXRuntime")
 
