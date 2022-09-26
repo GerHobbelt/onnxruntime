@@ -222,6 +222,8 @@ install(TARGETS onnxruntime
         LIBRARY   DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME   DESTINATION ${CMAKE_INSTALL_BINDIR}
         FRAMEWORK DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_config.h
+        TYPE INCLUDE)
 
 set_target_properties(onnxruntime PROPERTIES FOLDER "ONNXRuntime")
 
