@@ -4,6 +4,7 @@
 
 import argparse
 import contextlib
+import datetime
 import os
 import platform
 import re
@@ -1222,6 +1223,30 @@ def generate_build_tree(
                     "-DVERSION_PRIVATE_PART={}{}".format(MM, DD),
                     "-DVERSION_STRING={}.{}.{}.{}".format(ort_major, ort_minor, build_number, source_version[0:7]),
                 ]
+    else:
+        try:
+            # Get current git commit hash
+            commit_hash = subprocess.check_output(["git", "log", "-1", "--pretty=%h"], cwd=source_dir, text=True).strip()
+            if commit_hash:
+                # Get ORT major, minor, patch number
+                with open(os.path.join(source_dir, "VERSION_NUMBER")) as f:
+                    first_line = f.readline()
+                    ort_version_matches = re.match(r"(\d+)\.(\d+)\.(\d+)", first_line)
+                    if not ort_version_matches:
+                        raise BuildError("Couldn't read version from VERSION_FILE")
+                    ort_major = ort_version_matches.group(1)
+                    ort_minor = ort_version_matches.group(2)
+                    ort_build = ort_version_matches.group(3)
+                    short_date = datetime.date.today().strftime("%y%j")
+                    cmake_args += [
+                        "-DVERSION_MAJOR_PART={}".format(ort_major),
+                        "-DVERSION_MINOR_PART={}".format(ort_minor),
+                        "-DVERSION_BUILD_PART={}".format(ort_build),
+                        "-DVERSION_PRIVATE_PART={}".format(short_date),
+                        "-DVERSION_STRING={}.{}.{}.{}-{}".format(ort_major, ort_minor, ort_build, short_date, str(commit_hash)),
+                    ]
+        except subprocess.CalledProcessError:
+            raise BuildError("git returned non-zero error code during version calc")
 
     for config in configs:
         config_build_dir = get_config_build_dir(build_dir, config)

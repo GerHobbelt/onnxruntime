@@ -34,7 +34,7 @@ BEGIN
             VALUE "InternalName",     "ONNX Runtime"
             VALUE "LegalCopyright",   "\251 Microsoft Corporation. All rights reserved."
             VALUE "OriginalFilename", FILE_NAME
-            VALUE "ProductName",      "Microsoft\256 Windows\256 Operating System"
+            VALUE "ProductName",      "ONNX Runtime"
             VALUE "ProductVersion",   VER_STRING
         END
     END
