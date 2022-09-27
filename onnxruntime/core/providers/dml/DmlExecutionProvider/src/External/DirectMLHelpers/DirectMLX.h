@@ -2846,6 +2846,42 @@ namespace dml
         return output;
     }
 
+    inline Expression BatchNormalization(
+        Expression input,
+        Expression mean,
+        Expression variance,
+        Expression scale,
+        Expression bias,
+        bool spatial,
+        float epsilon,
+        const DML_OPERATOR_DESC* fusedActivation)
+    {
+        detail::GraphBuilder* builder = input.Impl()->GetGraphBuilder();
+        TensorDesc inputTensor = input.Impl()->GetOutputDesc();
+        TensorDesc meanTensor = mean.Impl()->GetOutputDesc();
+        TensorDesc varianceTensor = variance.Impl()->GetOutputDesc();
+        TensorDesc scaleTensor = scale.Impl()->GetOutputDesc();
+        TensorDesc biasTensor = bias.Impl()->GetOutputDesc();
+        TensorDesc outputTensor(inputTensor.dataType, inputTensor.sizes, builder->GetTensorPolicy());
+
+        DML_BATCH_NORMALIZATION_OPERATOR_DESC desc = {};
+        desc.InputTensor = inputTensor.AsPtr<DML_TENSOR_DESC>();
+        desc.MeanTensor = meanTensor.AsPtr<DML_TENSOR_DESC>();
+        desc.VarianceTensor = varianceTensor.AsPtr<DML_TENSOR_DESC>();
+        desc.ScaleTensor = scaleTensor.AsPtr<DML_TENSOR_DESC>();
+        desc.BiasTensor = biasTensor.AsPtr<DML_TENSOR_DESC>();
+        desc.OutputTensor = outputTensor.AsPtr<DML_TENSOR_DESC>();
+        desc.Spatial = spatial;
+        desc.Epsilon = epsilon;
+        desc.FusedActivation = fusedActivation;
+
+        detail::NodeOutput* const inputs[] = { input.Impl(), mean.Impl(), variance.Impl(), scale.Impl(), bias.Impl() };
+        detail::NodeID node = builder->CreateOperatorNode(DML_OPERATOR_BATCH_NORMALIZATION, &desc, inputs);
+        detail::NodeOutput* output = builder->CreateNodeOutput(node, 0, std::move(outputTensor));
+
+        return output;
+    }
+
 #if DML_TARGET_VERSION >= 0x3100
 
     struct BatchNormalizationGradOutputs
