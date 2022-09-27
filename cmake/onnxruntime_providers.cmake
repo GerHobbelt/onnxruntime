@@ -356,6 +356,7 @@ if (NOT onnxruntime_MINIMAL_BUILD AND NOT onnxruntime_EXTENDED_MINIMAL_BUILD
           RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
 endif()
+install(FILES $<TARGET_PDB_FILE:onnxruntime_providers_shared> DESTINATION ${CMAKE_INSTALL_BINDIR} OPTIONAL)
 
 if (onnxruntime_USE_CUDA)
   file(GLOB_RECURSE onnxruntime_providers_cuda_cc_srcs CONFIGURE_DEPENDS
@@ -569,6 +570,7 @@ if (onnxruntime_USE_CUDA)
           ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
           LIBRARY  DESTINATION "$<IF:$<BOOL:${WIN32}>,${CMAKE_INSTALL_BINDIR},${CMAKE_INSTALL_LIBDIR}>"
           RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR})
+  install(FILES $<TARGET_PDB_FILE:onnxruntime_providers_cuda> DESTINATION ${CMAKE_INSTALL_BINDIR} OPTIONAL)
   install(
     DIRECTORY ${PROJECT_SOURCE_DIR}/../include/onnxruntime/core/providers/cuda/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
@@ -771,6 +773,7 @@ if (onnxruntime_USE_TENSORRT)
           ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
           LIBRARY  DESTINATION "$<IF:$<BOOL:${WIN32}>,${CMAKE_INSTALL_BINDIR},${CMAKE_INSTALL_LIBDIR}>"
           RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR})
+  install(FILES $<TARGET_PDB_FILE:onnxruntime_providers_tensorrt> DESTINATION ${CMAKE_INSTALL_BINDIR} OPTIONAL)
 endif()
 
 if (onnxruntime_USE_VITISAI)
@@ -1144,7 +1147,8 @@ if (onnxruntime_USE_DML)
     endforeach()
     install(
       FILES
-        "${DML_PACKAGE_DIR}/bin/${onnxruntime_target_platform}-win/DirectML$<$<CONFIG:Debug>:.Debug>.dll"
+        "${DML_PACKAGE_DIR}/bin/${onnxruntime_target_platform}-win/DirectML.dll"
+        "${DML_PACKAGE_DIR}/bin/${onnxruntime_target_platform}-win/DirectML.pdb"
         #"${DML_PACKAGE_DIR}/bin/${onnxruntime_target_platform}-win/DirectML$<$<CONFIG:Debug>:.Debug>.pdb"
       DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
@@ -1182,7 +1186,7 @@ if (onnxruntime_USE_DML)
   target_link_libraries(onnxruntime_providers_dml PRIVATE delayimp.lib)
 
   if (NOT GDK_PLATFORM)
-    set(onnxruntime_DELAYLOAD_FLAGS "${onnxruntime_DELAYLOAD_FLAGS} /DELAYLOAD:DirectML.dll /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi.dll /DELAYLOAD:api-ms-win-core-com-l1-1-0.dll /DELAYLOAD:shlwapi.dll /DELAYLOAD:oleaut32.dll /ignore:4199")
+    set(onnxruntime_DELAYLOAD_FLAGS "${onnxruntime_DELAYLOAD_FLAGS} /DELAYLOAD:DirectML.dll /DELAYLOAD:DirectML.Debug.dll /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi.dll /DELAYLOAD:api-ms-win-core-com-l1-1-0.dll /DELAYLOAD:shlwapi.dll /DELAYLOAD:oleaut32.dll /ignore:4199")
   endif()
 
   target_compile_definitions(onnxruntime_providers_dml
