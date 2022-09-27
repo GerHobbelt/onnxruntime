@@ -86,7 +86,7 @@ namespace Dml
     {
         // For some reason lotus likes requesting 0 bytes of memory
         size = std::max<size_t>(1, size);
-        
+
         ComPtr<ID3D12Resource> resource;
         uint64_t resourceId = 0;
         uint64_t bucketSize = 0;
@@ -98,7 +98,7 @@ namespace Dml
 
             // Find the bucket for this allocation size
             gsl::index bucketIndex = GetBucketIndexFromSize(size);
-        
+
             if (gsl::narrow_cast<gsl::index>(m_pool.size()) <= bucketIndex)
             {
                 // Ensure there are sufficient buckets
@@ -107,7 +107,7 @@ namespace Dml
 
             bucket = &m_pool[bucketIndex];
             bucketSize = GetBucketSizeFromIndex(bucketIndex);
-            
+
             if (bucket->resources.empty())
             {
                 // No more resources in this bucket - allocate a new one
@@ -196,7 +196,7 @@ namespace Dml
 
             // Return the resource to the bucket
             Bucket* bucket = &m_pool[bucketIndex];
-            
+
             Resource resource = {allocInfo->DetachResource(), pooledResourceId};
             bucket->resources.push_back(resource);
         }
@@ -215,7 +215,7 @@ namespace Dml
         assert(m_outstandingAllocationsById[allocInfo->GetId()] == allocInfo);
         m_outstandingAllocationsById.erase(allocInfo->GetId());
     #endif
-        
+
         // The allocation info is already destructing at this point
     }
 
@@ -239,7 +239,7 @@ namespace Dml
 
         return allocInfo;
     }
-    
+
     void BucketizedBufferAllocator::SetDefaultRoundingMode(AllocatorRoundingMode roundingMode)
     {
         m_defaultRoundingMode = roundingMode;
@@ -260,17 +260,12 @@ namespace Dml
 
     void* CPUAllocator::Alloc(size_t size)
     {
-        if (size <= 0)
-        {
-            return nullptr;
-        }
-        void* p = malloc(size);
-        return p;
+        return onnxruntime::AllocatorDefaultAlloc(size);
     }
 
     void CPUAllocator::Free(void* p)
     {
-        free(p);
+        return onnxruntime::AllocatorDefaultFree(p);
     }
 
 } // namespace Dml
