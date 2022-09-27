@@ -693,7 +693,7 @@ extern "C" {
 // value.
 //
 
-#define MLAS_DEFAULT_PREFERRED_BUFFER_ALIGNMENT     32
+#define MLAS_DEFAULT_PREFERRED_BUFFER_ALIGNMENT     64
 
 //
 // Define the target number of per-thread multiplies before using another
@@ -987,7 +987,7 @@ MlasPartitionWork(
 #if defined(_MSC_VER) && !defined(__clang__)
   #pragma warning(push)
   // VC++ suggests we can attempt to make 'MlasBitsOfFp32' constexpr, but it is not valid.
-  #pragma warning(disable:26497) 
+  #pragma warning(disable:26497)
 #endif
 
 MLAS_FORCEINLINE
