@@ -4,6 +4,7 @@
 #include "gtest/gtest.h"
 #include "test/providers/provider_test_utils.h"
 #include "test/common/tensor_op_test_utils.h"
+#include "test/util/include/default_providers.h"
 
 using namespace ONNX_NAMESPACE;
 namespace onnxruntime {
@@ -21,8 +22,7 @@ TEST(TensorOpTest, Reshape) {
   test.AddInput<int64_t>("shape", {3}, {-1, 0, 2});
   test.AddOutput<float>("reshaped", {1, 3, 2}, std::vector<float>(6, 1.0f));
   // TensorRT doesn't support dynamic shape tensor for now
-  // Nuphar only supports reshape shape from initializer
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kNupharExecutionProvider, kTensorrtExecutionProvider});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
 }
 
 TEST(TensorOpTest, ReshapeWithEmptyDim) {
@@ -45,6 +45,11 @@ TEST(TensorOpTest, ReshapeWithEmptyInput) {
 }
 
 TEST(TensorOpTest, ReshapeWithEmptyInputAndDynamicShape) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: The input tensor cannot be reshaped to the requested shape. Input shape:{1,0}, requested shape:{1,0,-1}";
+  }
+
   {
     OpTester test("Reshape");
     test.AddInput<float>("data", {1, 0}, std::vector<float>());
@@ -83,11 +88,15 @@ TEST(TensorOpTest, Reshape_WithOutAllowZero) {
   test.AddAttribute<int64_t>("allowzero", 0);
   test.AddOutput<float>("reshaped", {2, 3}, std::vector<float>(6, 1.0f));
   // TensorRT doesn't support dynamic shape tensor for now
-  // Nuphar only supports reshape shape from initializer
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kNupharExecutionProvider, kTensorrtExecutionProvider});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
 }
 
 TEST(TensorOpTest, Reshape_WithAllowZero) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: MLOperatorAuthorImpl.cpp(2100): The parameter is incorrect.";
+  }
+
   OpTester test("Reshape", 14);
 
   test.AddInput<float>("data", {2, 3}, std::vector<float>(6, 1.0f));
@@ -95,23 +104,26 @@ TEST(TensorOpTest, Reshape_WithAllowZero) {
   test.AddAttribute<int64_t>("allowzero", 1);
   test.AddOutput<float>("reshaped", {2, 3}, std::vector<float>(6, 1.0f));
   // TensorRT doesn't support dynamic shape tensor for now
-  // Nuphar only supports reshape shape from initializer
   test.Run(OpTester::ExpectResult::kExpectFailure,
            "The input tensor cannot be reshaped to the requested shape",
-           {kNupharExecutionProvider, kTensorrtExecutionProvider});
+           {kTensorrtExecutionProvider});
 }
 
 TEST(TensorOpTest, Reshape_EmptyInputWithoutAllowZero) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: MLOperatorAuthorImpl.cpp(2100): The parameter is incorrect.";
+  }
+
   OpTester test("Reshape");
 
   test.AddInput<float>("data", {0, 3, 4}, std::vector<float>());
   test.AddInput<int64_t>("shape", {3}, {3, 4, 0});
   test.AddOutput<float>("reshaped", {3, 4, 0}, std::vector<float>());
   // TensorRT doesn't support dynamic shape tensor for now
-  // Nuphar only supports reshape shape from initializer
   test.Run(OpTester::ExpectResult::kExpectFailure,
            "The input tensor cannot be reshaped to the requested shape",
-           {kNupharExecutionProvider, kTensorrtExecutionProvider});
+           {kTensorrtExecutionProvider});
 }
 
 TEST(TensorOpTest, Reshape_EmptyInputWithAllowZero) {
@@ -123,8 +135,7 @@ TEST(TensorOpTest, Reshape_EmptyInputWithAllowZero) {
   test.AddOutput<float>("reshaped", {3, 4, 0}, std::vector<float>());
 
   // TensorRT doesn't support dynamic shape tensor for now
-  // Nuphar only supports reshape shape from initializer
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kNupharExecutionProvider, kTensorrtExecutionProvider});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
 }
 
 TEST(TensorOpTest, Reshape_UnknownDimWithoutAllowZero) {
@@ -137,6 +148,11 @@ TEST(TensorOpTest, Reshape_UnknownDimWithoutAllowZero) {
 }
 
 TEST(TensorOpTest, Reshape_UnknownDimWithAllowZero) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: MLOperatorAuthorImpl.cpp(2100): The parameter is incorrect.";
+  }
+
   OpTester test("Reshape", 14);
 
   test.AddInput<float>("data", {2, 3}, std::vector<float>(6, 1.0f));

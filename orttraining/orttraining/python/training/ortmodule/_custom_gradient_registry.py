@@ -212,18 +212,6 @@ CustomGradientRegistry.register_custom_stop_gradient_edges([0], "org.pytorch.ate
 CustomGradientRegistry.register_custom_stop_gradient_edges([0], "org.pytorch.aten", "ATen", "multinomial", "")
 
 
-@register_gradient("org.pytorch.aten", "ATen", "binary_cross_entropy_with_logits", "")
-def binary_cross_entropy_with_logits_gradient():
-    return [
-        (
-            ("ATen", "org.pytorch.aten"),
-            ["GO(0)", "I(0)", "I(1)", "I(2)", "I(3)", "I(4)"],
-            ["GI(0)"],
-            {"operator": {"value": "binary_cross_entropy_with_logits_backward", "dtype": "string"}},
-        ),
-    ]
-
-
 @register_gradient("org.pytorch.aten", "ATen", "numpy_T", "")
 def numpy_T_gradient():
     return [
@@ -234,3 +222,46 @@ def numpy_T_gradient():
             {"operator": {"value": "numpy_T", "dtype": "string"}},
         ),
     ]
+
+
+@register_gradient("org.pytorch.aten", "ATen", "native_group_norm", "")
+def native_group_norm_gradient():
+    return [
+        ("Constant", [], ["Const_0"], {"value": {"value": [True, True, True], "dtype": "bool", "is_tensor": True}}),
+        (
+            ("ATen", "org.pytorch.aten"),
+            ["GO(0)", "I(0)", "O(1)", "O(2)", "I(1)", "I(3)", "I(4)", "I(5)", "I(6)", "Const_0"],
+            ["GI(0)", "GI(1)", "GI(2)"],
+            {"operator": {"value": "native_group_norm_backward", "dtype": "string"}},
+        ),
+    ]
+
+
+def _upsample_nearest_gradient(backward_fn):
+    return [
+        ("Shape", ["I(0)"], ["Shape_X"]),
+        (
+            ("ATen", "org.pytorch.aten"),
+            ["GO(0)", "I(1)", "Shape_X", "I(2)"],
+            ["GI(0)"],
+            {
+                "operator": {"value": backward_fn, "dtype": "string"},
+                "overload_name": {"value": "vec", "dtype": "string"},
+            },
+        ),
+    ]
+
+
+@register_gradient("org.pytorch.aten", "ATen", "upsample_nearest1d", "vec")
+def upsample_nearest1d_gradient():
+    return _upsample_nearest_gradient("upsample_nearest1d_backward")
+
+
+@register_gradient("org.pytorch.aten", "ATen", "upsample_nearest2d", "vec")
+def upsample_nearest2d_gradient():
+    return _upsample_nearest_gradient("upsample_nearest2d_backward")
+
+
+@register_gradient("org.pytorch.aten", "ATen", "upsample_nearest3d", "vec")
+def upsample_nearest3d_gradient():
+    return _upsample_nearest_gradient("upsample_nearest3d_backward")

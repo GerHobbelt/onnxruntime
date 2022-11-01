@@ -105,6 +105,7 @@ target_compile_definitions(onnxruntime PRIVATE VER_MINOR=${VERSION_MINOR_PART})
 target_compile_definitions(onnxruntime PRIVATE VER_BUILD=${VERSION_BUILD_PART})
 target_compile_definitions(onnxruntime PRIVATE VER_PRIVATE=${VERSION_PRIVATE_PART})
 target_compile_definitions(onnxruntime PRIVATE VER_STRING=\"${VERSION_STRING}\")
+target_compile_definitions(onnxruntime PRIVATE FILE_NAME=\"onnxruntime.dll\")
 
 if(UNIX)
   if (APPLE)
@@ -178,7 +179,6 @@ set(onnxruntime_INTERNAL_LIBRARIES
   ${PROVIDERS_DML}
   ${PROVIDERS_NNAPI}
   ${PROVIDERS_SNPE}
-  ${PROVIDERS_NUPHAR}
   ${PROVIDERS_TVM}
   ${PROVIDERS_RKNPU}
   ${PROVIDERS_ROCM}

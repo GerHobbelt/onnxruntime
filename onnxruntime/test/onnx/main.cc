@@ -16,6 +16,7 @@
 #include "TestCase.h"
 #include "testenv.h"
 #include "providers.h"
+
 #include <google/protobuf/stubs/common.h>
 #include "core/platform/path_lib.h"
 #include "core/session/onnxruntime_cxx_api.h"
@@ -39,7 +40,7 @@ void usage() {
       "\t-v: verbose\n"
       "\t-n [test_case_name]: Specifies a single test case to run.\n"
       "\t-e [EXECUTION_PROVIDER]: EXECUTION_PROVIDER could be 'cpu', 'cuda', 'dnnl', 'tensorrt', "
-      "'openvino', 'nuphar', 'rocm', 'migraphx', 'acl', 'armnn', 'nnapi', 'snpe' or 'coreml'. "
+      "'openvino', 'rocm', 'migraphx', 'acl', 'armnn', 'xnnpack', 'nnapi', 'snpe' or 'coreml'. "
       "Default: 'cpu'.\n"
       "\t-p: Pause after launch, can attach debugger and continue\n"
       "\t-x: Use parallel executor, default (without -x): sequential executor.\n"
@@ -125,7 +126,6 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
   bool enable_cuda = false;
   bool enable_dnnl = false;
   bool enable_openvino = false;
-  bool enable_nuphar = false;
   bool enable_tensorrt = false;
   bool enable_mem_pattern = true;
   bool enable_nnapi = false;
@@ -136,6 +136,7 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
   bool enable_armnn = false;
   bool enable_rocm = false;
   bool enable_migraphx = false;
+  bool enable_xnnpack = false;
   int device_id = 0;
   GraphOptimizationLevel graph_optimization_level = ORT_ENABLE_ALL;
   bool user_graph_optimization_level_set = false;
@@ -194,8 +195,6 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
             enable_dnnl = true;
           } else if (!CompareCString(optarg, ORT_TSTR("openvino"))) {
             enable_openvino = true;
-          } else if (!CompareCString(optarg, ORT_TSTR("nuphar"))) {
-            enable_nuphar = true;
           } else if (!CompareCString(optarg, ORT_TSTR("tensorrt"))) {
             enable_tensorrt = true;
           } else if (!CompareCString(optarg, ORT_TSTR("nnapi"))) {
@@ -214,6 +213,8 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
             enable_rocm = true;
           } else if (!CompareCString(optarg, ORT_TSTR("migraphx"))) {
             enable_migraphx = true;
+          } else if (!CompareCString(optarg, ORT_TSTR("xnnpack"))) {
+            enable_xnnpack = true;
           } else {
             usage();
             return -1;
@@ -374,14 +375,6 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
       return -1;
 #endif
     }
-    if (enable_nuphar) {
-#ifdef USE_NUPHAR
-      Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_Nuphar(sf, /*allow_unaligned_buffers*/ 1, ""));
-#else
-      fprintf(stderr, "Nuphar is not supported in this build");
-      return -1;
-#endif
-    }
     if (enable_dnnl) {
 #ifdef USE_DNNL
       Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_Dnnl(sf, enable_cpu_mem_arena ? 1 : 0));
@@ -415,10 +408,7 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
 #endif
       std::istringstream ss(option_string);
       std::string token;
-
-      std::vector<const char*> snpe_option_keys;
-      std::vector<const char*> snpe_option_values;
-      std::vector<std::string> values;
+      std::unordered_map<std::string, std::string> snpe_options;
 
       while (ss >> token) {
         if (token == "") {
@@ -435,33 +425,26 @@ the run-time option you are trying to use.\n)");
 
         if (key == "runtime") {
           std::set<std::string> supported_runtime = {"CPU", "GPU_FP32", "GPU", "GPU_FLOAT16", "DSP", "AIP_FIXED_TF"};
-          if (supported_runtime.find(value) != supported_runtime.end()) {
-            snpe_option_keys.push_back("runtime");
-            values.push_back(value);
-          } else {
+          if (supported_runtime.find(value) == supported_runtime.end()) {
             ORT_THROW(R"(Wrong configuration value for the key 'runtime'.
 select from 'CPU', 'GPU_FP32', 'GPU', 'GPU_FLOAT16', 'DSP', 'AIP_FIXED_TF'. \n)");
           }
         } else if (key == "priority") {
-          snpe_option_keys.push_back("priority");
-          values.push_back(value);
+          // no validation
         } else if (key == "buffer_type") {
           std::set<std::string> supported_buffer_type = {"TF8", "TF16", "UINT8", "FLOAT", "ITENSOR"};
-          if (supported_buffer_type.find(value) != supported_buffer_type.end()) {
-            snpe_option_keys.push_back("buffer_type");
-            values.push_back(value);
-          } else {
+          if (supported_buffer_type.find(value) == supported_buffer_type.end()) {
             ORT_THROW(R"(Wrong configuration value for the key 'buffer_type'.
 select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
           }
         } else {
           ORT_THROW("Wrong key type entered. Choose from options: ['runtime', 'priority', 'buffer_type'] \n");
         }
+
+        snpe_options[key] = value;
       }
-      for (auto& it : values) {
-        snpe_option_values.push_back(it.c_str());
-      }
-      sf.AppendExecutionProvider_SNPE(snpe_option_keys.data(), snpe_option_values.data(), snpe_option_keys.size());
+
+      sf.AppendExecutionProvider("SNPE", snpe_options);
 #else
       fprintf(stderr, "SNPE is not supported in this build");
       return -1;
@@ -512,6 +495,15 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
       Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_MIGraphX(sf, device_id));
 #else
       fprintf(stderr, "MIGRAPHX is not supported in this build");
+      return -1;
+#endif
+    }
+
+    if (enable_xnnpack) {
+#ifdef USE_XNNPACK
+      sf.AppendExecutionProvider("XNNPACK", {});
+#else
+      fprintf(stderr, "XNNPACK is not supported in this build");
       return -1;
 #endif
     }
@@ -624,12 +616,13 @@ select from 'TF8', 'TF16', 'UINT8', 'FLOAT', 'ITENSOR'. \n)");
     {"BERT_Squad", "test data bug"},
     {"constantofshape_float_ones", "test data bug", {"onnx141", "onnx150"}},
     {"constantofshape_int_zeros", "test data bug", {"onnx141", "onnx150"}},
-    {"convtranspose_autopad_same", "Implementation need to be adjusted for ONNX changes"},
+    {"convtranspose_autopad_same", "Test data has been corrected in ONNX 1.10.", {"onnx180", "onnx181", "onnx190"}},
     {"cast_STRING_to_FLOAT", "Linux CI has old ONNX python package with bad test data", {"onnx141"}},
     // Numpy float to string has unexpected rounding for some results given numpy default precision is meant to be 8.
     // "e.g. 0.296140194 -> '0.2961402' not '0.29614019'. ORT produces the latter with precision set to 8,
     // which doesn't match the expected output that was generated with numpy.
     {"cast_FLOAT_to_STRING", "Numpy float to string has unexpected rounding for some results."},
+    {"cntk_simple_seg", "Bad onnx test output caused by wrong SAME_UPPER/SAME_LOWER for ConvTranspose", {}},
     {"tf_nasnet_large", "disable temporarily"},
     {"tf_nasnet_mobile", "disable temporarily"},
     {"tf_pnasnet_large", "disable temporarily"},

@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #include "core/providers/cpu/sequence/sequence_ops.h"
+
+#include "core/common/narrow.h"
 #include "core/framework/tensorprotoutils.h"
 #include "core/framework/TensorSeq.h"
 #include "core/framework/op_kernel_type_control_utils.h"
@@ -31,7 +33,7 @@ Status SequenceLength::Compute(OpKernelContext* context) const {
   const auto* X = context->Input<TensorSeq>(0);
 
   auto* Y = context->Output(0, {});
-  auto* Y_data = Y->template MutableData<int64_t>();
+  auto* Y_data = Y->MutableData<int64_t>();
   *Y_data = static_cast<int64_t>(X->Size());
 
   return Status::OK();
@@ -328,8 +330,6 @@ ORT_SPECIFY_OP_KERNEL_ARG_DEFAULT_TYPES_ALL_OPSETS(
 }  // namespace op_kernel_type_control
 
 namespace {
-using SplitToSequenceDataTypes = ORT_OP_KERNEL_ARG_DEFAULT_TYPE_LIST_ALL_OPSETS(
-    kCpuExecutionProvider, kOnnxDomain, SplitToSequence, Input, 0);
 using EnabledSplitToSequenceDataTypes = ORT_OP_KERNEL_ARG_ENABLED_TYPE_LIST_ALL_OPSETS(
     kCpuExecutionProvider, kOnnxDomain, SplitToSequence, Input, 0);
 }  // namespace
@@ -339,7 +339,6 @@ ONNX_CPU_OPERATOR_KERNEL(
     11,
     KernelDefBuilder()
         .TypeConstraint("T",
-                        BuildKernelDefConstraintsFromTypeList<SplitToSequenceDataTypes>(),
                         BuildKernelDefConstraintsFromTypeList<EnabledSplitToSequenceDataTypes>())
         .TypeConstraint("S", DataTypeImpl::AllSequenceTensorTypes())
         .TypeConstraint("I", std::vector<MLDataType>{
@@ -384,11 +383,11 @@ Status SplitToSequence::PrepareForCompute(const TensorShape& input_shape, int64_
   axis = HandleNegativeAxis(axis_, num_dimensions);  // handle negative and enforce axis is valid
   const int64_t split_dim_size = input_dims[axis];
 
-  before_dims = gsl::narrow<int>(input_shape.SizeToDimension(axis));
-  after_dims_including_split_axis = gsl::narrow<int>(input_shape.SizeFromDimension(axis));
+  before_dims = narrow<int>(input_shape.SizeToDimension(axis));
+  after_dims_including_split_axis = narrow<int>(input_shape.SizeFromDimension(axis));
   after_dims_excluding_split = (axis + 1 == num_dimensions)
                                    ? 1  // we multiply by this value so must be 1 not 0
-                                   : gsl::narrow<int>(input_shape.SizeFromDimension(axis + 1));
+                                   : narrow<int>(input_shape.SizeFromDimension(axis + 1));
 
   if (is_split_input_scalar) {
     auto num_even_splits = split_dim_size / split_scalar;
@@ -509,21 +508,21 @@ Status SplitToSequence::ComputeImpl(OpKernelContext& context, const Tensor& inpu
   auto output_dimensions = input_shape.AsShapeVector();
   std::vector<Tensor> tensors;
   int64_t input_offset = 0;
-  const T* input_data = input.template Data<T>();
+  const T* input_data = input.Data<T>();
   for (int i = 0; i < num_outputs; ++i) {
     // update size of dimension for axis we're splitting on while considering uneven split
     int split_size;
     if (is_uneven_split && i == num_outputs - 1) {  // only for the last output that has a size different from the rest
       split_size = num_remaining_splits;
     } else {
-      split_size = gsl::narrow<int>(split_sizes[i]);
+      split_size = narrow<int>(split_sizes[i]);
     }
     output_dimensions[axis] = split_size;
 
     AllocatorPtr alloc;
     ORT_RETURN_IF_ERROR(context.GetTempSpaceAllocator(&alloc));
     Tensor output_tensor(input.DataType(), onnxruntime::TensorShape(output_dimensions), alloc);
-    T* output_data = output_tensor.template MutableData<T>();
+    T* output_data = output_tensor.MutableData<T>();
 
     ::onnxruntime::math::CopyMatrix<T>(
         before_dims,                                       // M

@@ -26,7 +26,7 @@
 #include "test_fixture.h"
 #include "utils.h"
 #include "custom_op_utils.h"
-#include <gsl/gsl>
+#include "core/common/gsl.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -109,14 +109,6 @@ static void TestInference(Ort::Env& env, const std::basic_string<ORTCHAR_T>& mod
 #ifdef USE_DNNL
     Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_Dnnl(session_options, 1));
     std::cout << "Running simple inference with dnnl provider" << std::endl;
-#else
-    return;
-#endif
-  } else if (provider_type == 3) {
-#ifdef USE_NUPHAR
-    Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_Nuphar(session_options,
-                                                                      /*allow_unaligned_buffers*/ 1, ""));
-    std::cout << "Running simple inference with nuphar provider" << std::endl;
 #else
     return;
 #endif
@@ -236,7 +228,8 @@ TEST(CApiTest, dim_param) {
   // reading 1st dimension only so don't need to malloc int64_t* or const char** values for the Get*Dimensions calls
   int64_t dim_value = 0;
   const char* dim_param = nullptr;
-  in0_ttsi.GetDimensions(&dim_value, 1);
+  auto dims = in0_ttsi.GetShape();
+  if (!dims.empty()) dim_value = dims[0];
   in0_ttsi.GetSymbolicDimensions(&dim_param, 1);
   ASSERT_EQ(dim_value, -1) << "symbolic dimension should be -1";
   ASSERT_EQ(strcmp(dim_param, "n"), 0) << "Expected 'n'. Got: " << dim_param;
@@ -246,7 +239,10 @@ TEST(CApiTest, dim_param) {
   auto num_output_dims = out0_ttsi.GetDimensionsCount();
   ASSERT_EQ(num_output_dims, 1u);
 
-  out0_ttsi.GetDimensions(&dim_value, 1);
+  dim_value = 0;
+  dims = out0_ttsi.GetShape();
+  if (!dims.empty()) dim_value = dims[0];
+  
   out0_ttsi.GetSymbolicDimensions(&dim_param, 1);
   ASSERT_EQ(dim_value, -1) << "symbolic dimension should be -1";
   ASSERT_EQ(strcmp(dim_param, ""), 0);
@@ -285,7 +281,7 @@ TEST(CApiTest, SparseOutputModel) {
 
   const auto* values_fetch = sparse_output.GetSparseTensorValues<float>();
   auto val_span = gsl::make_span(values_fetch, values.size());
-  ASSERT_TRUE(std::equal(values.cbegin(), values.cend(), val_span.cbegin(), val_span.cend()));
+  ASSERT_TRUE(std::equal(values.cbegin(), values.cend(), val_span.begin(), val_span.end()));
 
   auto indices_ts = sparse_output.GetSparseTensorIndicesTypeShapeInfo(ORT_SPARSE_COO_INDICES);
   ASSERT_EQ(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, indices_ts.GetElementType());
@@ -295,7 +291,7 @@ TEST(CApiTest, SparseOutputModel) {
   const int64_t* indices = sparse_output.GetSparseTensorIndicesData<int64_t>(ORT_SPARSE_COO_INDICES, num_indices);
   ASSERT_EQ(num_indices, static_cast<size_t>(indices_shape[0]));
   auto ind_span = gsl::make_span(indices, num_indices);
-  ASSERT_TRUE(std::equal(coo_indices.cbegin(), coo_indices.cend(), ind_span.cbegin(), ind_span.cend()));
+  ASSERT_TRUE(std::equal(coo_indices.cbegin(), coo_indices.cend(), ind_span.begin(), ind_span.end()));
 }
 
 #ifndef DISABLE_CONTRIB_OPS
@@ -367,7 +363,7 @@ TEST(CApiTest, SparseInputModel) {
 
   const auto* result_vals = dense_Y.GetTensorData<float>();
   auto result_span = gsl::make_span(result_vals, Y_result.size());
-  ASSERT_TRUE(std::equal(Y_result.cbegin(), Y_result.cend(), result_span.cbegin(), result_span.cend()));
+  ASSERT_TRUE(std::equal(Y_result.cbegin(), Y_result.cend(), result_span.begin(), result_span.end()));
 }
 #endif  // DISABLE_CONTRIB_OPS
 #endif  // !defined(DISABLE_SPARSE_TENSORS)
@@ -406,9 +402,42 @@ TEST(CApiTest, custom_op_handler) {
 #endif
 }
 
+#ifdef USE_CUDA
+TEST(CApiTest, custom_op_set_input_memory_type) {
+  std::cout << "Running custom op inference" << std::endl;
+
+  std::vector<Input> inputs(1);
+  Input& input = inputs[0];
+  input.name = "X";
+  input.dims = {3, 2};
+  input.values = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+
+  // prepare expected inputs and outputs
+  std::vector<int64_t> expected_dims_y = {3, 2};
+  std::vector<float> expected_values_y = {2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f};
+
+  cudaStream_t compute_stream = nullptr;
+  cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking);
+  MyCustomOpSecondInputOnCpu custom_op{onnxruntime::kCudaExecutionProvider, compute_stream};
+
+  Ort::CustomOpDomain custom_op_domain("");
+  custom_op_domain.Add(&custom_op);
+
+  auto x_mem_type = custom_op.GetInputMemoryType(0);
+  auto y_mem_type = custom_op.GetInputMemoryType(1);
+  ASSERT_EQ(x_mem_type, OrtMemType::OrtMemTypeDefault);
+  ASSERT_EQ(y_mem_type, OrtMemType::OrtMemTypeCPUInput);
+
+  TestInference<float>(*ort_env, CUSTOM_OP_MODEL_URI, inputs, "Y", expected_dims_y, expected_values_y, 1,
+                       custom_op_domain, nullptr, nullptr, false, compute_stream);
+  cudaStreamDestroy(compute_stream);
+
+}
+#endif
+
 #if !defined(ORT_MINIMAL_BUILD) && !defined(REDUCED_OPS_BUILD)
 // disable test in reduced-op-build since TOPK and GRU are excluded there
-TEST(CApiTest, instant_op_handler) {
+TEST(CApiTest, standalone_op_handler) {
   std::vector<Input> inputs(1);
   Input& input = inputs[0];
   input.name = "X";
@@ -418,12 +447,20 @@ TEST(CApiTest, instant_op_handler) {
   std::vector<int64_t> expected_dims_y = {3, 2};
   std::vector<float> expected_values_y = {2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f};
 
-  InstantCustomOp instant_op{onnxruntime::kCpuExecutionProvider, nullptr};
-  Ort::CustomOpDomain custom_op_domain("");
-  custom_op_domain.Add(&instant_op);
+#ifdef USE_CUDA
+  StandaloneCustomOp standalone_op{onnxruntime::kCudaExecutionProvider, nullptr};
+#else
+  StandaloneCustomOp standalone_op{onnxruntime::kCpuExecutionProvider, nullptr};
+#endif
 
-  TestInference<float>(*ort_env, CUSTOM_OP_MODEL_URI, inputs, "Y", expected_dims_y, expected_values_y, 0,
-                       custom_op_domain, nullptr);
+  Ort::CustomOpDomain custom_op_domain("");
+  custom_op_domain.Add(&standalone_op);
+
+#ifdef USE_CUDA
+  TestInference<float>(*ort_env, CUSTOM_OP_MODEL_URI, inputs, "Y", expected_dims_y, expected_values_y, 1, custom_op_domain, nullptr);
+#else
+  TestInference<float>(*ort_env, CUSTOM_OP_MODEL_URI, inputs, "Y", expected_dims_y, expected_values_y, 0, custom_op_domain, nullptr);
+#endif
 }
 #endif
 
@@ -1044,16 +1081,6 @@ TEST(CApiTest, io_binding) {
 
 #if defined(USE_CUDA) || defined(USE_TENSORRT)
 TEST(CApiTest, io_binding_cuda) {
-  struct CudaMemoryDeleter {
-    explicit CudaMemoryDeleter(const Ort::Allocator* alloc) {
-      alloc_ = alloc;
-    }
-    void operator()(void* ptr) const {
-      alloc_->Free(ptr);
-    }
-
-    const Ort::Allocator* alloc_;
-  };
 
   Ort::SessionOptions session_options;
 #ifdef USE_TENSORRT
@@ -1071,8 +1098,7 @@ TEST(CApiTest, io_binding_cuda) {
 
   const std::array<int64_t, 2> x_shape = {3, 2};
   std::array<float, 3 * 2> x_values = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-  auto input_data = std::unique_ptr<void, CudaMemoryDeleter>(cuda_allocator.Alloc(x_values.size() * sizeof(float)),
-                                                             CudaMemoryDeleter(&cuda_allocator));
+  auto input_data = cuda_allocator.GetAllocation(x_values.size() * sizeof(float));
   ASSERT_NE(input_data.get(), nullptr);
   cudaMemcpy(input_data.get(), x_values.data(), sizeof(float) * x_values.size(), cudaMemcpyHostToDevice);
 
@@ -1082,8 +1108,7 @@ TEST(CApiTest, io_binding_cuda) {
 
   const std::array<int64_t, 2> expected_y_shape = {3, 2};
   const std::array<float, 3 * 2> expected_y = {1.0f, 4.0f, 9.0f, 16.0f, 25.0f, 36.0f};
-  auto output_data = std::unique_ptr<void, CudaMemoryDeleter>(cuda_allocator.Alloc(expected_y.size() * sizeof(float)),
-                                                              CudaMemoryDeleter(&cuda_allocator));
+  auto output_data = cuda_allocator.GetAllocation(expected_y.size() * sizeof(float));
   ASSERT_NE(output_data.get(), nullptr);
 
   // Create an OrtValue tensor backed by data on CUDA memory
@@ -1177,17 +1202,6 @@ TEST(CApiTest, cuda_graph) {
                   rel_cuda_options.get()) == nullptr);
 
   // Create IoBinding for inputs and outputs.
-  struct CudaMemoryDeleter {
-    explicit CudaMemoryDeleter(const Ort::Allocator* alloc) {
-      alloc_ = alloc;
-    }
-    void operator()(void* ptr) const {
-      alloc_->Free(ptr);
-    }
-
-    const Ort::Allocator* alloc_;
-  };
-
   Ort::Session session(*ort_env, MODEL_URI, session_options);
   Ort::MemoryInfo info_cuda("Cuda", OrtAllocatorType::OrtArenaAllocator, 0, OrtMemTypeDefault);
 
@@ -1197,8 +1211,8 @@ TEST(CApiTest, cuda_graph) {
 
   const std::array<int64_t, 2> x_shape = {3, 2};
   std::array<float, 3 * 2> x_values = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-  auto input_data = std::unique_ptr<void, CudaMemoryDeleter>(cuda_allocator.Alloc(x_values.size() * sizeof(float)),
-                                                             CudaMemoryDeleter(&cuda_allocator));
+  auto input_data = cuda_allocator.GetAllocation(x_values.size() * sizeof(float));
+  
   ASSERT_NE(input_data.get(), nullptr);
   cudaMemcpy(input_data.get(), x_values.data(), sizeof(float) * x_values.size(), cudaMemcpyHostToDevice);
 
@@ -1208,8 +1222,8 @@ TEST(CApiTest, cuda_graph) {
 
   const std::array<int64_t, 2> expected_y_shape = {3, 2};
   std::array<float, 3 * 2> expected_y = {1.0f, 4.0f, 9.0f, 16.0f, 25.0f, 36.0f};
-  auto output_data = std::unique_ptr<void, CudaMemoryDeleter>(cuda_allocator.Alloc(expected_y.size() * sizeof(float)),
-                                                              CudaMemoryDeleter(&cuda_allocator));
+  auto output_data = cuda_allocator.GetAllocation(expected_y.size() * sizeof(float));
+  
   ASSERT_NE(output_data.get(), nullptr);
 
   // Create an OrtValue tensor backed by data on CUDA memory
@@ -1422,9 +1436,10 @@ TEST(CApiTest, override_initializer) {
   size_t init_count = session.GetOverridableInitializerCount();
   ASSERT_EQ(init_count, 1U);
 
-  char* f1_init_name = session.GetOverridableInitializerName(0, allocator.get());
-  ASSERT_TRUE(strcmp("F1", f1_init_name) == 0);
-  allocator->Free(f1_init_name);
+  {
+    auto f1_init_name = session.GetOverridableInitializerNameAllocated(0, allocator.get());
+    ASSERT_TRUE(strcmp("F1", f1_init_name.get()) == 0);
+  }
 
   Ort::TypeInfo init_type_info = session.GetOverridableInitializerTypeInfo(0);
   ASSERT_EQ(ONNX_TYPE_TENSOR, init_type_info.GetONNXType());
@@ -1466,10 +1481,10 @@ TEST(CApiTest, end_profiling) {
   session_options_1.EnableProfiling("profile_prefix");
 #endif
   Ort::Session session_1(*ort_env, MODEL_WITH_CUSTOM_MODEL_METADATA, session_options_1);
-  char* profile_file = session_1.EndProfiling(allocator.get());
-
-  ASSERT_TRUE(std::string(profile_file).find("profile_prefix") != std::string::npos);
-  allocator->Free(profile_file);
+  {
+    auto profile_file = session_1.EndProfilingAllocated(allocator.get());
+    ASSERT_TRUE(std::string(profile_file.get()).find("profile_prefix") != std::string::npos);
+  }
   // Create session with profiling disabled
   Ort::SessionOptions session_options_2;
 #ifdef _WIN32
@@ -1478,9 +1493,10 @@ TEST(CApiTest, end_profiling) {
   session_options_2.DisableProfiling();
 #endif
   Ort::Session session_2(*ort_env, MODEL_WITH_CUSTOM_MODEL_METADATA, session_options_2);
-  profile_file = session_2.EndProfiling(allocator.get());
-  ASSERT_TRUE(std::string(profile_file) == std::string());
-  allocator->Free(profile_file);
+  {
+    auto profile_file = session_2.EndProfilingAllocated(allocator.get());
+    ASSERT_TRUE(std::string(profile_file.get()) == std::string());
+  }
 }
 
 TEST(CApiTest, get_profiling_start_time) {
@@ -1518,50 +1534,49 @@ TEST(CApiTest, model_metadata) {
     // Fetch model metadata
     auto model_metadata = session.GetModelMetadata();
 
-    char* producer_name = model_metadata.GetProducerName(allocator.get());
-    ASSERT_TRUE(strcmp("Hari", producer_name) == 0);
-    allocator.get()->Free(producer_name);
+    {
+      auto producer_name = model_metadata.GetProducerNameAllocated(allocator.get());
+      ASSERT_TRUE(strcmp("Hari", producer_name.get()) == 0);
+    }
 
-    char* graph_name = model_metadata.GetGraphName(allocator.get());
-    ASSERT_TRUE(strcmp("matmul test", graph_name) == 0);
-    allocator.get()->Free(graph_name);
+    {
+      auto graph_name = model_metadata.GetGraphNameAllocated(allocator.get());
+      ASSERT_TRUE(strcmp("matmul test", graph_name.get()) == 0);
+    }
 
-    char* domain = model_metadata.GetDomain(allocator.get());
-    ASSERT_TRUE(strcmp("", domain) == 0);
-    allocator.get()->Free(domain);
+    {
+      auto domain = model_metadata.GetDomainAllocated(allocator.get());
+      ASSERT_TRUE(strcmp("", domain.get()) == 0);
+    }
 
-    char* description = model_metadata.GetDescription(allocator.get());
-    ASSERT_TRUE(strcmp("This is a test model with a valid ORT config Json", description) == 0);
-    allocator.get()->Free(description);
+    {
+      auto description = model_metadata.GetDescriptionAllocated(allocator.get());
+      ASSERT_TRUE(strcmp("This is a test model with a valid ORT config Json", description.get()) == 0);
+    }
 
-    char* graph_description = model_metadata.GetGraphDescription(allocator.get());
-    ASSERT_TRUE(strcmp("graph description", graph_description) == 0);
-    allocator.get()->Free(graph_description);
+    {
+      auto graph_description = model_metadata.GetGraphDescriptionAllocated(allocator.get());
+      ASSERT_TRUE(strcmp("graph description", graph_description.get()) == 0);
+    }
 
     int64_t version = model_metadata.GetVersion();
     ASSERT_TRUE(version == 1);
 
-    int64_t num_keys_in_custom_metadata_map;
-    char** custom_metadata_map_keys = model_metadata.GetCustomMetadataMapKeys(allocator.get(),
-                                                                              num_keys_in_custom_metadata_map);
-    ASSERT_TRUE(num_keys_in_custom_metadata_map == 2);
+    {
+      auto custom_metadata_map_keys = model_metadata.GetCustomMetadataMapKeysAllocated(allocator.get());
+      ASSERT_EQ(custom_metadata_map_keys.size(), 2U);
+    }
 
-    allocator.get()->Free(custom_metadata_map_keys[0]);
-    allocator.get()->Free(custom_metadata_map_keys[1]);
-    allocator.get()->Free(custom_metadata_map_keys);
-
-    char* lookup_value_1 = model_metadata.LookupCustomMetadataMap("ort_config", allocator.get());
-    ASSERT_TRUE(strcmp(lookup_value_1,
+    auto lookup_value_1 = model_metadata.LookupCustomMetadataMapAllocated("ort_config", allocator.get());
+    ASSERT_TRUE(strcmp(lookup_value_1.get(),
                        "{\"session_options\": {\"inter_op_num_threads\": 5, \"intra_op_num_threads\": 2, "
                        "\"graph_optimization_level\": 99, \"enable_profiling\": 1}}") == 0);
-    allocator.get()->Free(lookup_value_1);
 
-    char* lookup_value_2 = model_metadata.LookupCustomMetadataMap("dummy_key", allocator.get());
-    ASSERT_TRUE(strcmp(lookup_value_2, "dummy_value") == 0);
-    allocator.get()->Free(lookup_value_2);
+    auto lookup_value_2 = model_metadata.LookupCustomMetadataMapAllocated("dummy_key", allocator.get());
+    ASSERT_TRUE(strcmp(lookup_value_2.get(), "dummy_value") == 0);
 
     // key doesn't exist in custom metadata map
-    char* lookup_value_3 = model_metadata.LookupCustomMetadataMap("key_doesnt_exist", allocator.get());
+    auto lookup_value_3 = model_metadata.LookupCustomMetadataMapAllocated("key_doesnt_exist", allocator.get());
     ASSERT_TRUE(lookup_value_3 == nullptr);
   }
 
@@ -1575,21 +1590,20 @@ TEST(CApiTest, model_metadata) {
     auto model_metadata = session.GetModelMetadata();
 
     // Model description is empty
-    char* description = model_metadata.GetDescription(allocator.get());
-    ASSERT_TRUE(strcmp("", description) == 0);
-    allocator.get()->Free(description);
+    {
+      auto description = model_metadata.GetDescriptionAllocated(allocator.get());
+      ASSERT_TRUE(strcmp("", description.get()) == 0);
+    }
 
     // Graph description is empty
-    char* graph_description = model_metadata.GetGraphDescription(allocator.get());
-    ASSERT_TRUE(strcmp("", graph_description) == 0);
-    allocator.get()->Free(graph_description);
+    {
+      auto graph_description = model_metadata.GetGraphDescriptionAllocated(allocator.get());
+      ASSERT_TRUE(strcmp("", graph_description.get()) == 0);
+    }
 
     // Model does not contain custom metadata map
-    int64_t num_keys_in_custom_metadata_map;
-    char** custom_metadata_map_keys = model_metadata.GetCustomMetadataMapKeys(allocator.get(),
-                                                                              num_keys_in_custom_metadata_map);
-    ASSERT_TRUE(num_keys_in_custom_metadata_map == 0);
-    ASSERT_TRUE(custom_metadata_map_keys == nullptr);
+    auto custom_metadata_map_keys = model_metadata.GetCustomMetadataMapKeysAllocated(allocator.get());
+    ASSERT_TRUE(custom_metadata_map_keys.empty());
   }
 }
 
@@ -1772,7 +1786,7 @@ TEST(CApiTest, TestSharingOfInitializerAndItsPrepackedVersion) {
 
   auto default_allocator = std::make_unique<MockedOrtAllocator>();
 
-  // create session 1
+  // create session 1 (using model path)
   Ort::Session session1(*ort_env, MATMUL_MODEL_URI, session_options, prepacked_weights_container);
   RunSession<float>(default_allocator.get(),
                     session1,
@@ -1782,8 +1796,18 @@ TEST(CApiTest, TestSharingOfInitializerAndItsPrepackedVersion) {
                     expected_values_y,
                     nullptr);
 
-  // create session 2
-  Ort::Session session2(*ort_env, MATMUL_MODEL_URI, session_options, prepacked_weights_container);
+  // create session 2 (using model bytes)
+  std::ifstream model_file_stream(MATMUL_MODEL_URI, std::ios::in | std::ios::binary);
+  ASSERT_TRUE(model_file_stream.good());
+
+  model_file_stream.seekg(0, std::ios::end);
+  size_t size = model_file_stream.tellg();
+  model_file_stream.seekg(0, std::ios::beg);
+  std::vector<char> file_contents(size, 0);
+  model_file_stream.read(&file_contents[0], size);
+  model_file_stream.close();
+
+  Ort::Session session2(*ort_env, file_contents.data(), size, session_options, prepacked_weights_container);
   RunSession<float>(default_allocator.get(),
                     session2,
                     inputs,
@@ -1993,7 +2017,10 @@ TEST(CApiTest, TestConfigureCUDAProviderOptions) {
 
   char* cuda_options_str = nullptr;
   ASSERT_TRUE(api.GetCUDAProviderOptionsAsString(rel_cuda_options.get(), allocator, &cuda_options_str) == nullptr);
-  std::string s(cuda_options_str, strnlen(cuda_options_str, 2048));
+  std::string s;
+  if (cuda_options_str != nullptr) {
+    s = std::string(cuda_options_str, strnlen(cuda_options_str, 2048));
+  }
   ASSERT_TRUE(s.find("device_id=0") != std::string::npos);
   ASSERT_TRUE(s.find("gpu_mem_limit=1024") != std::string::npos);
   ASSERT_TRUE(s.find("arena_extend_strategy=kSameAsRequested") != std::string::npos);
@@ -2155,4 +2182,16 @@ TEST(CApiTest, TestCudaMemcpyToHostWithSequenceTensors) {
   // model runs without crashing
 }
 
+#endif
+
+// Reduced Ops build doesn't support OptionalHasElement (16) yet
+#if !defined(REDUCED_OPS_BUILD) && !defined(DISABLE_OPTIONAL_TYPE)
+TEST(CApiTest, GH_11717) {
+  const auto* model_path = TSTR("testdata/gh_issue_11717.onnx");
+
+  Ort::SessionOptions session_options{};
+  // Just check if the model loads fine without a segmentation fault
+  // in the default CPU EP
+  EXPECT_NO_THROW(Ort::Session session(*ort_env, model_path, session_options));
+}
 #endif

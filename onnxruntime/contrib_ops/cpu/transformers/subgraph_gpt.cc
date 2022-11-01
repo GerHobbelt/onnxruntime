@@ -6,7 +6,7 @@
 #include "core/framework/tensorprotoutils.h"
 #include "core/framework/utils.h"
 #include "core/providers/cpu/tensor/utils.h"
-#include "gsl/gsl"
+#include "core/common/gsl.h"
 #include "contrib_ops/cpu/transformers/subgraph_gpt.h"
 #include "contrib_ops/cpu/transformers/dump_tensor.h"
 
@@ -21,9 +21,10 @@ Status GptSubgraph::CreateInitialFeeds(
     int pad_token_id,
     gsl::span<int32_t>& sequence_lengths,
     OrtValue& expanded_input_ids,
+    const OrtValue* attn_mask_value,
     std::vector<OrtValue>& feeds,
-    const BeamSearchDeviceHelper::CreateGptInputsFunc& create_gpt_inputs_func,
-    const BeamSearchDeviceHelper::AddToFeedsFunc& add_to_feeds_func,
+    const GenerationDeviceHelper::CreateGptInputsFunc& create_gpt_inputs_func,
+    const GenerationDeviceHelper::AddToFeedsFunc& add_to_feeds_func,
     IAllocatorUniquePtr<char>& buffer) {
   ORT_ENFORCE(session_state_ != nullptr, "Setup must be called before CreateInitialFeeds");
 
@@ -59,6 +60,7 @@ Status GptSubgraph::CreateInitialFeeds(
   OrtValue expanded_position_ids;
   OrtValue expanded_attention_mask;
   ORT_RETURN_IF_ERROR(create_gpt_inputs_func(&input_ids,
+                                             attn_mask_value,
                                              num_beams,
                                              pad_token_id,
                                              sequence_lengths,
@@ -73,7 +75,7 @@ Status GptSubgraph::CreateInitialFeeds(
                                         buffer));
 
   // The remaining inputs are past state.
-  for (int i = kFirstPastInputIndex; i < num_subgraph_inputs; ++i) {
+  for (int i = first_past_input_index_; i < num_subgraph_inputs; ++i) {
     feeds.push_back(empty_past);
   }
 
@@ -87,7 +89,7 @@ Status GptSubgraph::CreateInitialFeeds(
 
 Status GptSubgraph::Validate(const std::vector<const NodeArg*>& subgraph_inputs,
                              const std::vector<const NodeArg*>& subgraph_outputs) {
-  ORT_RETURN_IF(num_subgraph_outputs <= kFirstPresentOutputIndex,
+  ORT_RETURN_IF(num_subgraph_outputs <= first_present_output_index_,
                 "Invalid GPT-2 subgraph: number of outputs shall be larger than 1 (Need past state in outputs).");
 
   ORT_RETURN_IF(num_subgraph_inputs != num_subgraph_outputs + 2,
@@ -152,9 +154,9 @@ Status GptSubgraph::Validate(const std::vector<const NodeArg*>& subgraph_inputs,
   ORT_RETURN_IF(output_type != float32_type && output_type != float16_type,
                 "subgraph output 0 (logits) shall be float or float16 data type");
 
-  ORT_RETURN_IF(subgraph_inputs[kFirstPastInputIndex]->TypeAsProto()->tensor_type().elem_type() != output_type,
+  ORT_RETURN_IF(subgraph_inputs[first_past_input_index_]->TypeAsProto()->tensor_type().elem_type() != output_type,
                 "subgraph input 3 (past_0) shall shall have same data type of logits output");
-  ORT_RETURN_IF(subgraph_outputs[kFirstPresentOutputIndex]->TypeAsProto()->tensor_type().elem_type() != output_type,
+  ORT_RETURN_IF(subgraph_outputs[first_present_output_index_]->TypeAsProto()->tensor_type().elem_type() != output_type,
                 "subgraph output 1 (present_0) shall shall have same data type of logits output");
 
   is_output_float16_ = (output_type == float16_type);
