@@ -646,6 +646,12 @@ static Node& CreateNodeHelper(onnxruntime::Graph& graph, std::string_view op_typ
     graph.UpdateProducerNode(arg->Name(), node.Index());
   }
 
+#if !defined(ORT_MINIMAL_BUILD)
+  // add schema to make it equivalent with the other nodes in the graph created by Graph::Resolve()
+  // EPs may do kernel lookup during GetCapability which requires the schema
+  graph.SetOpSchemaFromRegistryForNode(node);
+#endif
+
   return node;
 }
 

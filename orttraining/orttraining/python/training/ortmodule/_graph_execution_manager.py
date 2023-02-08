@@ -177,6 +177,12 @@ class GraphExecutionManager(GraphExecutionInterface):
         # Memory aware gradient builder.
         self._use_memory_efficient_gradient = False
 
+        # Enable compute optimizer by default. Allowed to be disabled  via environment variable for
+        # convergence parity investigation.
+        self._enable_compute_optimizer = (
+            ortmodule._defined_from_envvar("ORTMODULE_ENABLE_COMPUTE_OPTIMIZER", 1, warn=True) == 1
+        )
+
         # Flag to re-export the model due to attribute change on original module.
         # Re-export will be avoided if _skip_check is enabled.
         self._original_model_has_changed = False
@@ -296,6 +302,13 @@ class GraphExecutionManager(GraphExecutionInterface):
         session_options.execution_order = onnxruntime.ExecutionOrder.PRIORITY_BASED
         # 0:Verbose, 1:Info, 2:Warning. 3:Error, 4:Fatal. Default is 2.
         session_options.log_severity_level = int(self._debug_options.logging.log_level)
+        # Disable memory alleviation by default. Allow user to enable it via environment variable.
+        alleviation_config = ortmodule._defined_from_envvar("ORTMODULE_MEMORY_OPT_CONFIG", "", warn=True)
+        probe_level = ortmodule._defined_from_envvar("ORTMODULE_MEMORY_OPT_PROBE_RECOMPUTE_LEVEL", "1", warn=True)
+        session_options.add_session_config_entry("optimization.enable_memory_optimizer", alleviation_config)
+        session_options.add_session_config_entry("optimization.enable_memory_probe_recompute_level", probe_level)
+        # Disable weight prepacking
+        session_options.add_session_config_entry("session.disable_prepacking", "1")
 
         if self._debug_options.save_onnx_models.save:
             session_options.optimized_model_filepath = os.path.join(
@@ -440,6 +453,7 @@ class GraphExecutionManager(GraphExecutionInterface):
         graph_transformer_config.propagate_cast_ops_config.level = self._propagate_cast_ops_level
         graph_transformer_config.propagate_cast_ops_config.allow = self._propagate_cast_ops_allow
         graph_transformer_config.propagate_cast_ops_config.strategy = self._propagate_cast_ops_strategy
+        graph_transformer_config.enable_compute_optimizer = self._enable_compute_optimizer
         return graph_transformer_config
 
     def _initialize_graph_builder(self):
