@@ -46,9 +46,18 @@ class ConvAddActivation : public NodeSelector {
 
   std::optional<NodesToOptimizeIndices> Select(const GraphViewer& graph_viewer, const Node& node) const override {
     const std::string_view node_ep = node.GetExecutionProviderType();
-    if (node_ep != kCpuExecutionProvider || !HasElementDataType(*node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT)) {
+#ifdef MLAS_F16VEC_INTRINSICS_SUPPORTED
+    if (node_ep != kCpuExecutionProvider ||
+        (!HasElementDataType(*node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT) &&
+         !HasElementDataType(*node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT16))) {
       return std::nullopt;
     }
+#else
+    if (node_ep != kCpuExecutionProvider ||
+        !HasElementDataType(*node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT)) {
+      return std::nullopt;
+    }
+#endif  // MLAS_F16VEC_INTRINSICS_SUPPORTED
     // we can't assign `conv_node` as the producer-node, even it is, because we have to make sure
     // 1. Its type is 'conv', 2. it has to satisfy the other requirements,like shape, please refer to SelectConvProducer for more info
     const Node* conv_node = nullptr;
@@ -93,7 +102,7 @@ class ConvAddActivation : public NodeSelector {
       if (graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "Relu", {6, 13, 14}) ||
           graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "Sigmoid", {6, 13}) ||
           graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "Tanh", {6, 13}) ||
-          graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "LeakyRelu", {6})) {
+          graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "LeakyRelu", {6, 16})) {
         return true;
       }
 
@@ -196,10 +205,10 @@ class FuseConvAddActivation : public ReplaceWithNew {
   NodeAttributes ExtraAttributes(const RuntimeState& state) const override {
     NodeAttributes extra_fused_conv_attributes;
 
-    const auto* activation = state.selected_nodes.Output(state.selected_nodes.num_outputs-1);
+    const auto* activation = state.selected_nodes.Output(state.selected_nodes.num_outputs - 1);
     if (state.selected_nodes.num_outputs == 1 || activation->OpType() == "Add") {
-        //activation node is the last node in conv+add+activation fusion pattern, while conv+add is also possible
-        return extra_fused_conv_attributes;
+      // activation node is the last node in conv+add+activation fusion pattern, while conv+add is also possible
+      return extra_fused_conv_attributes;
     }
     ORT_ENFORCE(activation != nullptr, "Expected activation node.");
 
@@ -242,7 +251,7 @@ class FuseConvAddActivation : public ReplaceWithNew {
     const auto conv_location = NTO::NodeLocation{NTO::NodeType::kTarget, 0};
     const auto add_location = NTO::NodeLocation{NTO::NodeType::kOutput, 0};
     const auto activation_location = NTO::NodeLocation{NTO::NodeType::kOutput, 1};
-    //Conv+add+activation
+    // Conv+add+activation
     if (state.selected_nodes.num_outputs == 2) {
       return {
           MoveAll(conv_location, ArgType::kInput),                                       // move all inputs from conv
@@ -250,7 +259,7 @@ class FuseConvAddActivation : public ReplaceWithNew {
           MoveAll(activation_location, ArgType::kOutput),                                // move all outputs from relu
       };
     } else {
-      //Conv+Add only
+      // Conv+Add only
       return {
           MoveAll(conv_location, ArgType::kInput),                                       // move all inputs from conv
           MoveAndAppend(add_location, ArgType::kInput, add_input_idx, ArgType::kInput),  // append add input
@@ -268,7 +277,6 @@ void RegisterConvAddActivationFusionRules(SelectorActionRegistry& registry) {
   registry.RegisterSelectorAndAction(name, {{"Conv", {1, 11}}},
                                      std::move(selector), std::move(action));
 }
-
 
 SelectorActionRegistry CreateSelectorActionRegistry() {
   SelectorActionRegistry registry{};

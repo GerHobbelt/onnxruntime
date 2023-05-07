@@ -76,7 +76,7 @@ console.log('=== Start to pull WebAssembly artifacts from CI ===');
 downloadJson(
     'https://dev.azure.com/onnxruntime/onnxruntime/_apis/build/builds?api-version=6.1-preview.6' +
         '&definitions=161' +
-        '&resultFilter=succeeded' +
+        '&resultFilter=succeeded%2CpartiallySucceeded' +
         '&$top=1' +
         '&repositoryId=Microsoft/onnxruntime' +
         '&repositoryType=GitHub' +
@@ -112,10 +112,14 @@ downloadJson(
                 extractFile(zip, WASM_FOLDER, 'ort-wasm-threaded.wasm', 'Release_wasm');
                 extractFile(zip, WASM_FOLDER, 'ort-wasm-simd.wasm', 'Release_wasm');
                 extractFile(zip, WASM_FOLDER, 'ort-wasm-simd-threaded.wasm', 'Release_wasm');
+                extractFile(zip, WASM_FOLDER, 'ort-wasm-simd.jsep.wasm', 'Release_wasm');
+                extractFile(zip, WASM_FOLDER, 'ort-wasm-simd-threaded.jsep.wasm', 'Release_wasm');
 
                 extractFile(zip, JS_FOLDER, 'ort-wasm.js', 'Release_wasm');
                 extractFile(zip, JS_FOLDER, 'ort-wasm-threaded.js', 'Release_wasm');
                 extractFile(zip, JS_FOLDER, 'ort-wasm-threaded.worker.js', 'Release_wasm');
+                extractFile(zip, JS_FOLDER, 'ort-wasm-simd.jsep.js', 'Release_wasm');
+                extractFile(zip, JS_FOLDER, 'ort-wasm-simd-threaded.jsep.js', 'Release_wasm');
               });
             });
           });

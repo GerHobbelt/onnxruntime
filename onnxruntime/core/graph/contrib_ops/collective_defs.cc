@@ -30,6 +30,10 @@ void RegisterCollectiveOps() {
   ONNX_CONTRIB_OPERATOR_SCHEMA(AllGather)
       .SetDomain(kMSDomain)
       .SinceVersion(1)
+      .Attr("axis",
+            "the axis to gather on.",
+            AttributeProto::INT,
+            static_cast<int64_t>(1))
       .Attr("group_size",
             "total size in the group that need to be gathered.",
             AttributeProto::INT,
@@ -42,6 +46,7 @@ void RegisterCollectiveOps() {
           "Constrain to float, float16 and double tensors.")
       .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
         auto group_size = getAttribute(ctx, "group_size", 1);
+        auto axis = getAttribute(ctx, "axis", 0);
         assert(group_size >= static_cast<int64_t>(1));
         // propagate type for output
         propagateElemTypeFromInputToOutput(ctx, 0, 0);
@@ -52,10 +57,27 @@ void RegisterCollectiveOps() {
         auto input_type = ctx.getInputType(0);
         if (hasShape(*input_type)) {
           auto shape = input_type->tensor_type().shape();
-          auto dim = shape.dim(0) * group_size;
-          *shape.mutable_dim(0) = dim;
+          auto dim = shape.dim(static_cast<int>(axis)) * group_size;
+          *shape.mutable_dim(static_cast<int>(axis)) = dim;
           *output_type->mutable_tensor_type()->mutable_shape() = shape;
         }
+      });
+
+  ONNX_CONTRIB_OPERATOR_SCHEMA(AllToAll)
+      .SetDomain(kMSDomain)
+      .SinceVersion(1)
+      .Attr("group_size",
+            "total size in the group that need to participate.",
+            AttributeProto::INT,
+            static_cast<int64_t>(1))
+      .Input(0, "input", "tensors to be sent", "T", OpSchema::Variadic)
+      .Output(0, "output", "collected tensors", "T", OpSchema::Variadic)
+      .TypeConstraint(
+          "T",
+          {"tensor(float16)", "tensor(float)", "tensor(double)"},
+          "Constrain to float, float16 and double tensors.")
+      .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
+        propagateShapeAndTypeFromFirstInput(ctx);
       });
 }
 

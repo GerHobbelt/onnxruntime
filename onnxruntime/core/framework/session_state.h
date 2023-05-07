@@ -162,7 +162,7 @@ class SessionState {
 #endif
 
 #ifdef ENABLE_TRAINING
-// This is referenced in training::TrainingSession. Should be removed when this class is removed.
+  // This is referenced in training::TrainingSession. Should be removed when this class is removed.
   /**
     Get some initialized tensors (weights).
     @param interested_weights The names of the weights to retrieve.
@@ -307,6 +307,10 @@ class SessionState {
     return parent_;
   }
 
+  // Clear all removable attributes if they exists.
+  // The function logs the list of removable attributes for every node.
+  void PruneRemovableAttributes();
+
   size_t GetNumberOfPrepacksCounter() const {
     return number_of_prepacks_counter_;
   }
@@ -384,7 +388,7 @@ class SessionState {
                                   const SessionOptions& session_options,
                                   bool remove_initializers,
                                   InlinedHashMap<std::string, size_t>& constant_initializers_use_count,
-                                  const InlinedHashMap<OrtValueName, OrtMemoryInfo>& outer_scope_node_arg_to_location_map = {},
+                                  const InlinedHashMap<OrtValueName, OrtDevice>& outer_scope_node_arg_to_location_map = {},
                                   bool graph_info_already_created = false);
 
 #ifdef ENABLE_TRAINING
@@ -447,7 +451,7 @@ class SessionState {
   // for internal allocations by CUDAExecutionProvider::GetScratchBuffer, but could access the per-thread allocator
   // directly instead of going through CUDAExecutionProvider::GetAllocator.
   // If that can be validated we could simply store the AllocatorPtr here and get rid of the delegate.
-  std::map<OrtMemoryInfo, std::function<AllocatorPtr(int id, OrtMemType mem_type)>,
+  std::map<OrtMemoryInfo, std::function<AllocatorPtr(OrtMemType mem_type)>,
            OrtMemoryInfoLessThanIgnoreNameAndAllocType>
       allocators_;
 

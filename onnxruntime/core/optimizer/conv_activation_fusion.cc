@@ -7,6 +7,7 @@
 
 #include "core/common/inlined_containers.h"
 #include "core/framework/tensorprotoutils.h"
+#include "core/mlas/inc/mlas.h"
 #include "core/graph/graph_utils.h"
 #include "core/graph/node_attr_utils.h"
 #include "core/optimizer/utils.h"
@@ -49,10 +50,22 @@ bool ConvFusionDataTypeCheck(const Node& conv_node) {
   // Assess the support level for the other compatible EPs and if they also
   // only support float, remove the EP check altogether.
   const std::string_view node_ep = conv_node.GetExecutionProviderType();
-  if (node_ep == kCudaExecutionProvider || node_ep == kCpuExecutionProvider) {
+  if (node_ep == kCudaExecutionProvider) {
     if (!HasElementDataType(*conv_node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT)) {
       return false;
     }
+  }
+  if (node_ep == kCpuExecutionProvider) {
+#ifdef MLAS_F16VEC_INTRINSICS_SUPPORTED
+    if (!HasElementDataType(*conv_node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT) &&
+        !HasElementDataType(*conv_node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT16)) {
+      return false;
+    }
+#else
+    if (!HasElementDataType(*conv_node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT)) {
+      return false;
+    }
+#endif  // MLAS_F16VEC_INTRINSICS_SUPPORTED
   }
 
   return true;
@@ -70,11 +83,11 @@ class ConvActivation : public NodeSelector {
       return std::nullopt;
     }
 
-    auto is_supported_non_cuda_ep_activation = [&graph_viewer](const Node& activation_node) {
+    auto is_supported_non_cuda_rocm_ep_activation = [&graph_viewer](const Node& activation_node) {
       if (graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "Relu", {6, 13, 14}) ||
           graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "Sigmoid", {6, 13}) ||
           graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "Tanh", {6, 13}) ||
-          graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "LeakyRelu", {6})) {
+          graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "LeakyRelu", {6, 16})) {
         return true;
       }
 
@@ -94,17 +107,17 @@ class ConvActivation : public NodeSelector {
     }
 
     // check EP type and activation
-    if (node_ep == kCudaExecutionProvider) {
+    if (node_ep == kCudaExecutionProvider || node_ep == kRocmExecutionProvider) {
       if (!graph_utils::IsSupportedOptypeVersionAndDomain(*next_node, "Relu", {6, 13, 14})) {
         return std::nullopt;
       }
     } else if (node_ep.empty() || node_ep == kCpuExecutionProvider) {
-      if (!is_supported_non_cuda_ep_activation(*next_node) &&
+      if (!is_supported_non_cuda_rocm_ep_activation(*next_node) &&
           !graph_utils::IsSupportedOptypeVersionAndDomain(*next_node, "HardSigmoid", {6})) {
         return std::nullopt;
       }
     } else {
-      if (!is_supported_non_cuda_ep_activation(*next_node)) {
+      if (!is_supported_non_cuda_rocm_ep_activation(*next_node)) {
         return std::nullopt;
       }
     }

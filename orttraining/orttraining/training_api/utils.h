@@ -25,7 +25,7 @@ bool GetParamNameFromSuffix(const std::string& name, const std::string& suffix, 
 bool GetParamNameFromGradient(const std::string& grad_name, std::string& param_name);
 
 // Allocate OrtValue like the input ortvalue on the same device
-Status OrtValueLike(const SessionState& sess_state, const OrtValue& input_val, OrtValue& output_val);
+Status CreateZeroValuedOrtValueLike(const SessionState& sess_state, const OrtValue& input_val, OrtValue& output_val);
 
 // Create OrtValue from a single value of type T
 template <typename T>
@@ -34,7 +34,7 @@ void WrapInOrtValue(T value,
                     AllocatorPtr alloc = nullptr) {
   static CPUExecutionProviderInfo info;
   static CPUExecutionProvider cpu_provider(info);
-  static AllocatorPtr cpu_allocator = cpu_provider.GetAllocator(0, OrtMemTypeDefault);
+  static AllocatorPtr cpu_allocator = cpu_provider.GetAllocator(OrtMemTypeDefault);
 
   TensorShape shape({1});
   auto element_type = DataTypeImpl::GetType<T>();
@@ -47,35 +47,13 @@ void WrapInOrtValue(T value,
                    DataTypeImpl::GetType<Tensor>()->GetDeleteFunc());
 }
 
-// Create OrtValue on CPU out of provided inputs
 template <typename T>
-static void CreateInputOrtValue(gsl::span<const int64_t> dims,
-                                const std::vector<T>& value,
-                                OrtValue* p_ortvalue,
-                                AllocatorPtr alloc = nullptr) {
-  static CPUExecutionProviderInfo info;
-  static CPUExecutionProvider cpu_provider(info);
-  static AllocatorPtr cpu_allocator = cpu_provider.GetAllocator(0, OrtMemTypeDefault);
-
-  TensorShape shape(dims);
-  assert(shape.Size() == static_cast<int64_t>(value.size()));
-  auto element_type = DataTypeImpl::GetType<T>();
-  auto allocator = alloc ? alloc : cpu_allocator;
-  auto p_tensor = std::make_unique<Tensor>(element_type, shape, allocator);
-
-  // TODO: Handle memcpy for other allocators
-  if (value.size() > 0 && !alloc) {  // using CPU allocator
-    memcpy(p_tensor->MutableDataRaw(), value.data(), p_tensor->SizeInBytes());
-  }
-
-  p_ortvalue->Init(p_tensor.release(),
-                   DataTypeImpl::GetType<Tensor>(),
-                   DataTypeImpl::GetType<Tensor>()->GetDeleteFunc());
-}
-
-template <typename T>
-T GetValue(OrtValue& ort_value) {
+T GetScalarFromOrtValue(OrtValue& ort_value) {
   const Tensor& tensor = ort_value.Get<Tensor>();
+  const TensorShape& shape = tensor.Shape();
+  size_t dim_count = shape.NumDimensions();
+  // Be noted: TensorShape returns 1 for rank 0 tensor.
+  ORT_ENFORCE(shape.Size() == 1 && (dim_count == 0 || dim_count == 1));
   T val;
   if (DataTypeImpl::GetType<T>() == tensor.DataType()) {
     val = *(tensor.template Data<T>());

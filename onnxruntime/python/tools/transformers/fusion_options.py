@@ -31,7 +31,6 @@ class FusionOptions:
         # (1) Attention has merged weights for Q/K/V projection, which might be faster in some cases since 3 MatMul is
         #     merged into one.
         # (2) Attention could only handle self attention; MultiHeadAttention could handle both self and cross attention.
-        # (3) MultiHeadAttention has only cuda implementation right now.
         self.use_multi_head_attention = False
 
         self.enable_skip_layer_norm = True
@@ -46,14 +45,20 @@ class FusionOptions:
 
         # Set default to sequence length for BERT model to use fused attention to speed up.
         # Note that embed layer normalization will convert 2D mask to 1D when mask type is MaskIndexEnd.
-        self.attention_mask_format = (
-            AttentionMaskFormat.MaskIndexEnd if model_type == "bert" else AttentionMaskFormat.AttentionMask
-        )
+        self.attention_mask_format = AttentionMaskFormat.AttentionMask
+        if model_type == "bert":
+            self.attention_mask_format = AttentionMaskFormat.MaskIndexEnd
+        elif model_type == "vit":
+            self.attention_mask_format = AttentionMaskFormat.NoMask
 
         # options for stable diffusion
-        self.enable_group_norm = model_type == "unet"
-        self.enable_bias_splitgelu = model_type == "unet"
-        self.enable_packed_kv = model_type == "unet"
+        if model_type in ["unet", "vae", "clip"]:
+            self.enable_nhwc_conv = True
+            self.enable_group_norm = True
+            self.enable_bias_splitgelu = True
+            self.enable_packed_qkv = True
+            self.enable_packed_kv = True
+            self.enable_bias_add = True
 
     def use_raw_attention_mask(self, use_raw_mask=True):
         if use_raw_mask:
@@ -95,10 +100,21 @@ class FusionOptions:
             options.use_raw_attention_mask(True)
         if args.no_attention_mask:
             options.disable_attention_mask()
-        if args.disable_group_norm:
-            options.enable_group_norm = False
-        if args.disable_packed_kv:
-            options.enable_packed_kv = False
+
+        if args.model_type in ["unet", "vae", "clip"]:
+            if args.disable_nhwc_conv:
+                options.enable_nhwc_conv = False
+            if args.disable_group_norm:
+                options.enable_group_norm = False
+            if args.disable_bias_splitgelu:
+                options.enable_bias_splitgelu = False
+            if args.disable_packed_qkv:
+                options.enable_packed_qkv = False
+            if args.disable_packed_kv:
+                options.enable_packed_kv = False
+            if args.disable_bias_add:
+                options.enable_bias_add = False
+
         return options
 
     @staticmethod
@@ -212,8 +228,7 @@ class FusionOptions:
             required=False,
             action="store_true",
             help="Use MultiHeadAttention instead of Attention operator for testing purpose. "
-            "Note that MultiHeadAttention might be slower than Attention since MatMul of input projection is excluded. "
-            "MultiHeadAttention has only CUDA implementation so the model can only run with cuda execution provider.",
+            "Note that MultiHeadAttention might be slower than Attention when qkv are not packed. ",
         )
         parser.set_defaults(use_multi_head_attention=False)
 
@@ -221,7 +236,7 @@ class FusionOptions:
             "--disable_group_norm",
             required=False,
             action="store_true",
-            help="not fuse GroupNorm. Only works for model_type=unet",
+            help="not fuse GroupNorm. Only works for model_type=unet or vae",
         )
         parser.set_defaults(disable_group_norm=False)
 
@@ -229,6 +244,38 @@ class FusionOptions:
             "--disable_packed_kv",
             required=False,
             action="store_true",
-            help="not use packed kv in cross attention. Only works for model_type=unet",
+            help="not use packed kv for cross attention in MultiHeadAttention. Only works for model_type=unet",
         )
         parser.set_defaults(disable_packed_kv=False)
+
+        parser.add_argument(
+            "--disable_packed_qkv",
+            required=False,
+            action="store_true",
+            help="not use packed qkv for self attention in MultiHeadAttention. Only works for model_type=unet",
+        )
+        parser.set_defaults(disable_packed_qkv=False)
+
+        parser.add_argument(
+            "--disable_bias_add",
+            required=False,
+            action="store_true",
+            help="not fuse BiasAdd. Only works for model_type=unet",
+        )
+        parser.set_defaults(disable_bias_add=False)
+
+        parser.add_argument(
+            "--disable_bias_splitgelu",
+            required=False,
+            action="store_true",
+            help="not fuse BiasSplitGelu. Only works for model_type=unet",
+        )
+        parser.set_defaults(disable_bias_splitgelu=False)
+
+        parser.add_argument(
+            "--disable_nhwc_conv",
+            required=False,
+            action="store_true",
+            help="Do not use NhwcConv. Only works for model_type=unet or vae",
+        )
+        parser.set_defaults(disable_nhwc_conv=False)
