@@ -3,47 +3,48 @@
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
-import warnings  # noqa: F401
+from typing import Callable
 
 import torch
 import torch.onnx.symbolic_helper as sym_help
+from packaging import version
 from packaging.version import Version
 from torch.onnx import register_custom_op_symbolic
-from torch.onnx.symbolic_helper import _get_tensor_dim_size, _get_tensor_sizes, parse_args
+from torch.onnx.symbolic_helper import parse_args
 
-from onnxruntime.training import ortmodule
+from onnxruntime.training.utils import pytorch_type_to_onnx_dtype
 
-# Mapping from pytorch scalar type to onnx scalar type.
-_CAST_PYTORCH_TO_ONNX = {
-    "Byte": torch.onnx.TensorProtoDataType.UINT8,
-    "Char": torch.onnx.TensorProtoDataType.INT8,
-    "Double": torch.onnx.TensorProtoDataType.DOUBLE,
-    "Float": torch.onnx.TensorProtoDataType.FLOAT,
-    "Half": torch.onnx.TensorProtoDataType.FLOAT16,
-    "Int": torch.onnx.TensorProtoDataType.INT32,
-    "Long": torch.onnx.TensorProtoDataType.INT64,
-    "Short": torch.onnx.TensorProtoDataType.INT16,
-    "Bool": torch.onnx.TensorProtoDataType.BOOL,
-    "ComplexFloat": torch.onnx.TensorProtoDataType.COMPLEX64,
-    "ComplexDouble": torch.onnx.TensorProtoDataType.COMPLEX128,
-    "BFloat16": torch.onnx.TensorProtoDataType.BFLOAT16,
-    "Undefined": torch.onnx.TensorProtoDataType.UNDEFINED,
-}
+from ._utils import get_runtime_pytorch_version
 
 
-def pytorch_type_to_onnx(scalar_type: str) -> torch.onnx.TensorProtoDataType:
-    try:
-        return torch.onnx.JitScalarType.from_name(scalar_type).onnx_type()
-    except AttributeError:
-        return _CAST_PYTORCH_TO_ONNX[scalar_type]
+def wrap_custom_export_function(original_func: Callable) -> Callable:
+    """This function is to wrap the custom export function to make sure it can be used by different versions of PyTorch.
 
+    Args:
+        original_func: The original custom export function.
 
-def wrap_custom_export_function(original_func):
-    # Starting from PyTorch 1.11, there has been a change to symbolic function signature
-    # in terms of how additional context is accessed. More info at
-    # https://github.com/pytorch/pytorch/blob/6b02648479d3615fa3260961e24f38dd0f22da94/torch/onnx/symbolic_helper.py#L48
-    # This code can be cleaned up once support for PyTorch version < 1.11 is dropped.
-    try:
+    Note1:
+        [PyTorch exporter breaking change] Starting from PyTorch 1.11, there has been a change to symbolic function
+        signature in terms of how additional context is accessed. More info at
+        https://github.com/pytorch/pytorch/blob/6b02648479d3615fa3260961e24f38dd0f22da94/torch/onnx/symbolic_helper.py#L48
+        This code can be cleaned up once support for PyTorch version < 1.11 is dropped.
+    Note2:
+        [PyTorch exporter breaking change] Custom export function's first argument is SymbolicContext since 1.11, but
+        is changed later, and will be deprecated in 1.13 as claimed. So we need to use GraphContext as the first
+        argument instead.
+
+    """
+    runtime_pytorch_version = get_runtime_pytorch_version()
+
+    if runtime_pytorch_version >= version.parse("1.13"):
+        from torch.onnx._internal import jit_utils
+
+        def _export_with_ctx(graph_context: jit_utils.GraphContext, *args, **kwargs):
+            return original_func(graph_context, graph_context.original_node, *args, **kwargs)
+
+        return _export_with_ctx
+
+    elif runtime_pytorch_version >= version.parse("1.11"):
         from torch.onnx import SymbolicContext
 
         def _export_with_ctx(ctx: SymbolicContext, graph, *args, **kwargs):
@@ -51,7 +52,7 @@ def wrap_custom_export_function(original_func):
             return original_func(graph, node, *args, **kwargs)
 
         return _export_with_ctx
-    except ImportError:
+    else:
 
         def _export_with_no_ctx(graph, *args, **kwargs):
             return original_func(graph, None, *args, **kwargs)
@@ -60,20 +61,20 @@ def wrap_custom_export_function(original_func):
 
 
 class CustomOpSymbolicRegistry:
-    _SYMBOLICS = {}
+    _SYMBOLICS = {}  # noqa: RUF012
 
     @classmethod
     def register(cls, name, domain, fn):
         cls._SYMBOLICS[domain + "::" + name] = fn
 
     @classmethod
-    def register_all(cls):
+    def register_all(cls, onnx_opset_version):
         for name, fn in cls._SYMBOLICS.items():
             # Symbolic name is in format: domain::name
             register_custom_op_symbolic(
                 name,
                 fn,
-                ortmodule._defined_from_envvar("ORTMODULE_ONNX_OPSET_VERSION", ortmodule.ONNX_OPSET_VERSION),
+                onnx_opset_version,
             )
 
 
@@ -128,7 +129,7 @@ def cross_entropy_loss(g, node, logits, target, weight, reduction, ignore_index,
         output_type = logits_casted.type()
     else:
         # For higher version torch we can get node output types
-        loss_output = list(node.outputs())[0]
+        loss_output = next(iter(node.outputs()))
         output_type = loss_output.type()
     ##################################
 
@@ -144,7 +145,7 @@ def cross_entropy_loss(g, node, logits, target, weight, reduction, ignore_index,
         weight_casted,
         ignore_index,
         reduction_s=reduction,
-        output_type_i=pytorch_type_to_onnx(output_type.scalarType()),
+        output_type_i=pytorch_type_to_onnx_dtype(output_type.scalarType()),
         outputs=2,
     )
     output.setType(output_type)
@@ -171,10 +172,16 @@ def embedding(g, weight, indices, padding_idx, scale_grad_by_freq, sparse):
     output = g.op(
         "org.pytorch.aten::ATen", weight, indices, padding_idx, scale_grad_by_freq, sparse, operator_s="embedding"
     )
-    indices_shape = _get_tensor_sizes(indices)
-    if indices_shape is not None and hasattr(weight.type(), "with_sizes"):
-        output_type = weight.type().with_sizes([*indices_shape, _get_tensor_dim_size(weight, 1)])
-        output.setType(output_type)
+
+    try:
+        # Tolerant to the case when sizes of indices are not available or not usable (for example
+        # when DeepSpeed stage3 enabled, all weights size is (0), this will fail.)
+        indices_shape = sym_help._get_tensor_sizes(indices)
+        if indices_shape is not None and hasattr(weight.type(), "with_sizes"):
+            output_type = weight.type().with_sizes([*indices_shape, sym_help._get_tensor_dim_size(weight, 1)])
+            output.setType(output_type)
+    except IndexError:
+        output.setType(weight.type())
     return output
 
 
@@ -803,14 +810,65 @@ def upsample_nearest3d(g, input, output_size, scale_factors):
     return _upsample_nearest(g, input, output_size, scale_factors, "upsample_nearest3d")
 
 
-@register_symbolic("upsample_bilinear2d")
-def upsample_bilinear2d(g, input, output_size, align_corners, scale_factors):
+@register_symbolic("upsample_bicubic2d")
+def upsample_bicubic2d(g, input, output_size, align_corners, scale_factors):
     return g.op(
         "org.pytorch.aten::ATen",
         input,
         output_size,
         align_corners,
         scale_factors,
-        operator_s="upsample_bilinear2d",
+        operator_s="upsample_bicubic2d",
         overload_name_s="vec",
     )
+
+
+@register_symbolic("layer_norm")
+@parse_args("v", "is", "v", "v", "f", "none")
+def layer_norm(g, input, normalized_shape, weight, bias, eps, cudnn_enable):
+    # normalized_shape: input shape from an expected input of size
+    # axis: The first normalization dimension.
+    # layer_norm normalizes on the last D dimensions,
+    # where D is the size of normalized_shape
+    axis = -len(normalized_shape)
+
+    res, new_running_mean, new_running_var = g.op(
+        "LayerNormalization",
+        input,
+        weight,
+        bias,
+        epsilon_f=eps,
+        axis_i=axis,
+        outputs=3,  # force all 3 outputs to be exported in training mode
+        operator_s="layer_norm",
+        overload_name_s="vec",
+    )
+
+    return res
+
+
+# Adapted from torch.onnx.symbolic_opset13.softmax -
+# https://github.com/pytorch/pytorch/blob/cf06189a2d2785ac493bcd0d55e520af5a0e3b97/torch/onnx/symbolic_opset13.py#L27
+# We don't need overloads symbolic_opset9 because training support opsets >= 13.
+#
+# Why we need to define softmax export logic here?
+# For the usage `nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32)` in the model,
+# https://github.com/huggingface/transformers/blob/76a33a10923ccc1074917f6b6a1e719e626b7dc9/src/transformers/models/mistral/modeling_mistral.py#L302
+# If dtype is specified, the input tensor is casted to dtype before the operation is performed.
+# This is useful for preventing data type overflows. While existing ONNX exporter do the cast after the operation.
+# This override can be a workaround before PyTorch fix the issues in coming releases.
+# (TODO: pengwa - add PyTorch versions when the issue is fixed).
+@register_symbolic("softmax")
+@parse_args("v", "i", "none")
+def softmax(g, input, dim, dtype=None):
+    from torch.onnx import _type_utils
+
+    casted_input = input
+    need_cast_for_compute = dtype and dtype.node().kind() != "prim::Constant"
+    if need_cast_for_compute:
+        parsed_dtype = sym_help._get_const(dtype, "i", "dtype")
+        casted_input = g.op("Cast", input, to_i=_type_utils.JitScalarType(parsed_dtype).onnx_type())
+
+    softmax = g.op("Softmax", casted_input, axis_i=dim)
+
+    return softmax

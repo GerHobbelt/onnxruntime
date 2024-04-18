@@ -204,6 +204,14 @@ AllocatorPtr IExecutionFrame::GetAllocator(const OrtDevice& info) const {
 
 Status IExecutionFrame::ReleaseMLValue(int ort_value_idx) { return ReleaseMLValueImpl(ort_value_idx); }
 
+#ifdef ENABLE_TRAINING
+void IExecutionFrame::ReleaseAllMLValues() {
+  for (size_t ort_value_idx = 0; ort_value_idx < all_values_.size(); ort_value_idx++) {
+    all_values_[ort_value_idx] = OrtValue();
+  }
+}
+#endif
+
 Status IExecutionFrame::ReleaseMLValueImpl(int ort_value_idx) {
   if (ort_value_idx == NodeIndexInfo::kInvalidEntry || static_cast<size_t>(ort_value_idx) >= all_values_size_) {
     return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "invalid index ", ort_value_idx);
@@ -223,7 +231,8 @@ void IExecutionFrame::Init(gsl::span<const int> feed_mlvalue_idxs, gsl::span<con
                            const std::unordered_map<int, OrtValue>& initializers,
                            const std::function<bool(const std::string& name)>& is_initializer_sparse_func,
                            gsl::span<const OrtValue> fetches) {
-  ORT_ENFORCE(feeds.size() == feed_mlvalue_idxs.size());
+  ORT_ENFORCE(feeds.size() == feed_mlvalue_idxs.size(), "Get feed size: ", feeds.size(), " but expected feed size: ",
+              feed_mlvalue_idxs.size());
   ORT_ENFORCE(fetches.empty() || fetches.size() == fetch_mlvalue_idxs_.size());
 
   // Need this for sparse conversions in host memory
@@ -421,14 +430,14 @@ ExecutionFrame::ExecutionFrame(gsl::span<const int> feed_mlvalue_idxs, gsl::span
               // Planning of one memory type should only happen once.
 #if !defined(ORT_MINIMAL_BUILD) && defined(ORT_MEMORY_PROFILE)
               ORT_ENFORCE(
-                  static_activation_memory_sizes_in_byte_.find(location.name) ==
+                  static_activation_memory_sizes_in_byte_.find(location.ToString()) ==
                       static_activation_memory_sizes_in_byte_.end(),
                   "Memory type ",
-                  location.name,
+                  location.ToString(),
                   " should only appear once.");
               // static_activation_memory_in_bytes_ is max virtual memory size the planner computes.
               // Memory dynamically allocated when executing kernels is not recorded using this field.
-              static_activation_memory_sizes_in_byte_[location.name] = peak_size;
+              static_activation_memory_sizes_in_byte_[location.ToString()] = peak_size;
 #endif
               // the memory pattern buffer will leave in the whole execution.
 #ifdef ORT_ENABLE_STREAM
@@ -609,7 +618,7 @@ Status ExecutionFrame::AllocateMLValueTensorSelfOwnBufferHelper(OrtValue& ort_va
     // Dynamic activation size would be accessed by multiple threads
     // if parallel executor is used.
     std::unique_lock<std::mutex> lock(mtx_);
-    dynamic_activation_memory_sizes_in_byte_[location.name] += size;
+    dynamic_activation_memory_sizes_in_byte_[location.ToString()] += size;
     session_state_.GetMemoryProfiler()->GetMemoryInfo().SetDynamicAllocation(ort_value_index);
 #endif
   }
@@ -830,7 +839,20 @@ AllocatorPtr ExecutionFrame::GetAllocatorImpl(const OrtDevice& info) const {
 // This method is not thread safe!
 // Return S_OK and nullptr if index map to a value that is an unused optional input/output
 Status ExecutionFrame::CreateNodeOutputMLValueImpl(OrtValue& ort_value, int ort_value_idx, const TensorShape* shape) {
+#ifdef ENABLE_TRAINING
+  try {
+    auto status = AllocateAsPerAllocationPlan(ort_value, ort_value_idx, shape);
+    return status;
+  } catch (const std::exception& e) {
+    LOGS(session_state_.Logger(), WARNING)
+        << "Exception caught when allocating memory for ort_value with index: " << ort_value_idx
+        << "so clean up all OrtValues";
+    ReleaseAllMLValues();
+    return Status(ONNXRUNTIME, FAIL, e.what());
+  }
+#else
   return AllocateAsPerAllocationPlan(ort_value, ort_value_idx, shape);
+#endif
 }
 
 void ExecutionFrame::VerifyOutputSizes(int output_index, const Node& node, const TensorShape& output_shape) {

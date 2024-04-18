@@ -220,7 +220,7 @@ def load_dataset(args):
 
     # Load the dataset into a pandas dataframe.
     df = pd.read_csv(
-        os.path.join(args.data_dir, "in_domain_train.tsv"),
+        os.path.join(args.data_dir if os.path.exists(args.data_dir) else "cola_public/raw", "in_domain_train.tsv"),
         delimiter="\t",
         header=None,
         names=["sentence_source", "label", "label_notes", "sentence"],
@@ -441,7 +441,7 @@ def main():
 
     # 4. Train loop (fine-tune)
     total_training_time, total_test_time, epoch_0_training, validation_accuracy = 0, 0, 0, 0
-    for epoch_i in range(0, args.epochs):
+    for epoch_i in range(args.epochs):
         total_training_time += train(model, optimizer, scheduler, train_dataloader, epoch_i, device, args)
         if not args.pytorch_only and epoch_i == 0:
             epoch_0_training = total_training_time

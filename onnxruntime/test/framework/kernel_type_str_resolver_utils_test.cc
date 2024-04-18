@@ -5,7 +5,7 @@
 
 #include <iostream>
 #include <sstream>
-
+#include <iomanip>
 #include "gtest/gtest.h"
 
 #include "core/flatbuffers/schema/ort.fbs.h"
@@ -26,8 +26,7 @@ static Status LoadLayoutTransformationRequiredOpsFromOpSchemas(KernelTypeStrReso
   return Status::OK();
 }
 
-TEST(KernelTypeStrResolverUtilsTest, DISABLED_VerifyLayoutTransformationRequiredOpsResolver) {  // actual_resolver.GetOpKernelTypeStrMap()
-                                                                                                //     Which is: { (com.microsoft:QLinearConv:1, { ("y_scale",
+TEST(KernelTypeStrResolverUtilsTest, VerifyLayoutTransformationRequiredOpsResolver) {
   KernelTypeStrResolver expected_resolver;
   ASSERT_STATUS_OK(LoadLayoutTransformationRequiredOpsFromOpSchemas(expected_resolver));
 
@@ -50,7 +49,9 @@ TEST(KernelTypeStrResolverUtilsTest, DISABLED_VerifyLayoutTransformationRequired
 #endif  // !defined(DISABLE_CONTRIB_OPS)
 }
 
-// run this test manually to output a hard-coded byte array
+// run this test manually to output a hard-coded byte array.
+// update AddLayoutTransformationRequiredOpsToKernelTypeStrResolver in
+// onnxruntime/core/framework/kernel_type_str_resolver_utils.cc
 TEST(KernelTypeStrResolverUtilsTest, DISABLED_PrintExpectedLayoutTransformationRequiredOpsResolverByteArray) {
 #if defined(DISABLE_CONTRIB_OPS)
   FAIL() << "Contrib ops must be enabled.";

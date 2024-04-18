@@ -32,6 +32,21 @@ std::unique_ptr<IExecutionProvider> CANNProviderFactory::CreateProvider() {
 }
 
 struct ProviderInfo_CANN_Impl : ProviderInfo_CANN {
+  int cannGetDeviceCount() override {
+    uint32_t num_devices = 0;
+    CANN_CALL_THROW(aclrtGetDeviceCount(&num_devices));
+    return num_devices;
+  }
+
+  void cannMemcpy_HostToDevice(void* dst, const void* src, size_t count) override {
+    CANN_CALL_THROW(aclrtMemcpy(dst, count, src, count, ACL_MEMCPY_HOST_TO_DEVICE));
+    CANN_CALL_THROW(aclrtSynchronizeStream(0));
+  }
+
+  void cannMemcpy_DeviceToHost(void* dst, const void* src, size_t count) override {
+    CANN_CALL_THROW(aclrtMemcpy(dst, count, src, count, ACL_MEMCPY_DEVICE_TO_HOST));
+  }
+
   void CANNExecutionProviderInfo__FromProviderOptions(const ProviderOptions& options,
                                                       CANNExecutionProviderInfo& info) override {
     info = CANNExecutionProviderInfo::FromProviderOptions(options);
@@ -40,6 +55,13 @@ struct ProviderInfo_CANN_Impl : ProviderInfo_CANN {
   std::shared_ptr<IExecutionProviderFactory>
   CreateExecutionProviderFactory(const CANNExecutionProviderInfo& info) override {
     return std::make_shared<CANNProviderFactory>(info);
+  }
+
+  std::shared_ptr<IAllocator> CreateCannAllocator(int16_t device_id, size_t npu_mem_limit,
+                                                  onnxruntime::ArenaExtendStrategy arena_extend_strategy,
+                                                  OrtArenaCfg* default_memory_arena_cfg) override {
+    return CANNExecutionProvider::CreateCannAllocator(device_id, npu_mem_limit, arena_extend_strategy,
+                                                      default_memory_arena_cfg);
   }
 } g_info;
 
@@ -55,6 +77,7 @@ struct CANN_Provider : Provider {
     info.arena_extend_strategy = params->arena_extend_strategy;
     info.enable_cann_graph = params->enable_cann_graph != 0;
     info.dump_graphs = params->dump_graphs != 0;
+    info.dump_om_model = params->dump_om_model != 0;
     info.precision_mode = params->precision_mode;
     info.op_select_impl_mode = params->op_select_impl_mode;
     info.optypelist_for_implmode = params->optypelist_for_implmode;
@@ -72,6 +95,7 @@ struct CANN_Provider : Provider {
     cann_options.arena_extend_strategy = internal_options.arena_extend_strategy;
     cann_options.enable_cann_graph = internal_options.enable_cann_graph;
     cann_options.dump_graphs = internal_options.dump_graphs;
+    cann_options.dump_om_model = internal_options.dump_om_model;
     cann_options.precision_mode = internal_options.precision_mode;
     cann_options.op_select_impl_mode = internal_options.op_select_impl_mode;
     cann_options.optypelist_for_implmode = internal_options.optypelist_for_implmode;

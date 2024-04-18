@@ -18,9 +18,7 @@
 #include "core/session/onnxruntime_c_api.h"
 #include "core/session/ort_apis.h"
 
-using onnxruntime::BFloat16;
 using onnxruntime::DataTypeImpl;
-using onnxruntime::MLFloat16;
 #if !defined(DISABLE_SPARSE_TENSORS)
 using onnxruntime::SparseTensor;
 #endif
@@ -87,6 +85,16 @@ ORT_API_STATUS_IMPL(OrtApis::GetSymbolicDimensions,
   return nullptr;
 }
 
+ORT_API_STATUS_IMPL(OrtApis::SetSymbolicDimensions,
+                    _In_ struct OrtTensorTypeAndShapeInfo* info,
+                    _In_ const char** names, _In_ size_t dim_params_length) {
+  info->dim_params.clear();
+  for (size_t idx = 0; idx < dim_params_length; ++idx) {
+    info->dim_params.push_back(names[idx]);
+  }
+  return nullptr;
+}
+
 ORT_API_STATUS_IMPL(OrtApis::GetTensorShapeElementCount,
                     _In_ const OrtTensorTypeAndShapeInfo* this_ptr, _Out_ size_t* out) {
   API_IMPL_BEGIN
@@ -107,6 +115,18 @@ constexpr ONNXTensorElementDataType TensorDataTypeToOnnxRuntimeTensorElementData
       break;
     case o::TensorProto_DataType_DOUBLE:
       type = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
+      break;
+    case o::TensorProto_DataType_FLOAT8E4M3FN:
+      type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN;
+      break;
+    case o::TensorProto_DataType_FLOAT8E4M3FNUZ:
+      type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FNUZ;
+      break;
+    case o::TensorProto_DataType_FLOAT8E5M2:
+      type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2;
+      break;
+    case o::TensorProto_DataType_FLOAT8E5M2FNUZ:
+      type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2FNUZ;
       break;
     case o::TensorProto_DataType_FLOAT16:
       type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;

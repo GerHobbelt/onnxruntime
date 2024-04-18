@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
+// Copyright (c) 2023 NVIDIA Corporation.
 // Licensed under the MIT License.
 
 #pragma once
+
+#include <limits>
 
 #include "onnxruntime_c_api.h"
 #include "core/framework/arena_extend_strategy.h"
@@ -29,6 +32,10 @@ struct OrtCUDAProviderOptionsV2 {
   int cudnn_conv1d_pad_to_nc1d = 0;                                                                            // flag specifying if pad Conv1D's input [N,C,D] to [N,C,1,D] or [N,C,D,1].
   int tunable_op_enable = 0;                                                                                   // flag specifying if TunableOp is enabled.
   int tunable_op_tuning_enable = 0;                                                                            // flag specifying if TunableOp is enabled for tuning, this relies on TunableOp is enabled.
+  int tunable_op_max_tuning_duration_ms = 0;                                                                   // Max tuning duration time limit for TunableOp.
   int enable_skip_layer_norm_strict_mode = 0;                                                                  // flag specifying if SkipLayerNorm is in strict mode. If true, use LayerNormalization kernel.
                                                                                                                // The strict mode has better accuracy but lower performance.
+  int prefer_nhwc = 0;                                                                                         // make the CUDA EP NHWC preferred
+  int use_ep_level_unified_stream = 0;                                                                         // flag specifying if ep level stream is used or not
+  int use_tf32 = 1;                                                                                            // use TF32
 };
