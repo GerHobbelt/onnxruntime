@@ -1538,6 +1538,27 @@ private:
     uint32_t m_numHeads;
 };
 
+class GroupQueryAttentionHelper
+{
+public:
+    template <typename Info_t, typename Shape_t>
+    GroupQueryAttentionHelper(const Info_t& info, const Shape_t& shapeInfo)
+    {
+        Initialize(KernelInformationAdapter(info));
+    }
+
+    std::vector<EdgeShapes> GetOutputShapes(const MLShapeInferenceContext& shapeInfo) const;
+
+protected:
+    uint32_t GetTotalSequenceLength() { return m_totalSequenceLength; }
+
+private:
+    void Initialize(const IKernelInformationAdapter& kernelInformation);
+
+    uint32_t m_kvNumHeads;
+    uint32_t m_totalSequenceLength;
+};
+
 class AttentionHelper
 {
 public:
@@ -1583,6 +1604,24 @@ public:
     template <typename Info_t, typename Shape_t>
     BiasSplitGeluHelper(const Info_t& info, const Shape_t& shapeInfo) { }
     std::vector<EdgeShapes> GetOutputShapes(const MLShapeInferenceContext& shapeInfo) const;
+};
+
+class MatMulNBitsHelper
+{
+public:
+    template <typename Info_t, typename Shape_t>
+    MatMulNBitsHelper(const Info_t& info, const Shape_t& shapeInfo)
+    {
+        Initialize(KernelInformationAdapter(info));
+    }
+
+    std::vector<EdgeShapes> GetOutputShapes(const MLShapeInferenceContext& shapeInfo) const;
+
+private:
+    void Initialize(const IKernelInformationAdapter& kernelInformation);
+
+    int64_t m_bRowCount;
+    int64_t m_bColCount;
 };
 
 using ShapeInferenceHelper_Conv = ConvHelper;
@@ -1720,6 +1759,7 @@ using ShapeInferenceHelper_QLinearSigmoid = GetOutputShapeAsInputShapeHelper;
 using ShapeInferenceHelper_QAttention = QAttentionHelper;
 using ShapeInferenceHelper_Attention = AttentionHelper;
 using ShapeInferenceHelper_MultiHeadAttention = MultiHeadAttentionHelper;
+using ShapeInferenceHelper_GroupQueryAttention = GroupQueryAttentionHelper;
 using ShapeInferenceHelper_RotaryEmbedding = GetOutputShapeAsInputShapeHelper;
 using ShapeInferenceHelper_Sign = GetBroadcastedOutputShapeHelper;
 using ShapeInferenceHelper_IsNaN = GetBroadcastedOutputShapeHelper;
@@ -1837,5 +1877,6 @@ using ShapeInferenceHelper_DmlFusedSum = GetBroadcastedOutputShapeHelper;
 using ShapeInferenceHelper_Shape = ShapeHelper;
 using ShapeInferenceHelper_Size = SizeHelper;
 using ShapeInferenceHelper_BiasSplitGelu = BiasSplitGeluHelper;
+using ShapeInferenceHelper_MatMulNBits = MatMulNBitsHelper;
 
 }  // namespace OperatorHelper
