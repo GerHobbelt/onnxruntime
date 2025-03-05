@@ -533,30 +533,31 @@ Status TidlExecutionProvider::Compile(const std::vector<FusedNodeAndGraph>& fuse
                                                std::vector<NodeComputeInfo>& node_compute_funcs) {
 
   for (auto& fused_node_graph : fused_nodes_and_graphs) {
-    const GraphViewer& graph_body_viewer = fused_node_graph.filtered_graph;
-    const Node& fused_node = fused_node_graph.fused_node;
-    const Graph& graph = graph_body_viewer.GetGraph();
-    Graph& graph_body1 = const_cast<Graph&>(graph);
-    const IndexedSubGraph* indexed_sub_graph = graph_body_viewer.GetFilterInfo(); //changed from func_body->Body() to graph_body_viewer.GetGraph()
-    const auto func_body = FunctionImpl(graph_body1, *indexed_sub_graph);
-    // if (!func_body) {
-    //   return common::Status(common::ONNXRUNTIME, common::INVALID_ARGUMENT, "Function body is empty");
-    // }
-    const Graph& graph_body = func_body.Body();
-    onnxruntime::Model model(graph_body.Name(), true, ModelMetaData(), PathString(),
-                             IOnnxRuntimeOpSchemaRegistryList(), graph.DomainToVersionMap(),
-                             std::vector<ONNX_NAMESPACE::FunctionProto>(), *GetLogger());
-    ONNX_NAMESPACE::ModelProto* model_proto = new ONNX_NAMESPACE::ModelProto();
-    *model_proto = model.ToProto();
-    *(model_proto->mutable_graph()) = graph_body.ToGraphProto();
-    model_proto->set_ir_version(ONNX_NAMESPACE::Version::IR_VERSION);
+    std::string *string_buf = new std::string();
+    if (is_import_)
+    {
+      const GraphViewer& graph_body_viewer = fused_node_graph.filtered_graph;
+      const Node& fused_node = fused_node_graph.fused_node;
+      const Graph& graph = graph_body_viewer.GetGraph();
+      Graph& graph_body1 = const_cast<Graph&>(graph);
+      const IndexedSubGraph* indexed_sub_graph = graph_body_viewer.GetFilterInfo(); //changed from func_body->Body() to graph_body_viewer.GetGraph()
+      const auto func_body = FunctionImpl(graph_body1, *indexed_sub_graph);
+      const Graph& graph_body = func_body.Body();
+      onnxruntime::Model model(graph_body.Name(), true, ModelMetaData(), PathString(),
+                              IOnnxRuntimeOpSchemaRegistryList(), graph.DomainToVersionMap(),
+                              std::vector<ONNX_NAMESPACE::FunctionProto>(), *GetLogger());
+      ONNX_NAMESPACE::ModelProto* model_proto = new ONNX_NAMESPACE::ModelProto();
+      *model_proto = model.ToProto();
+      *(model_proto->mutable_graph()) = graph_body.ToGraphProto();
+      model_proto->set_ir_version(ONNX_NAMESPACE::Version::IR_VERSION);
 
-    std::string * string_buf = new std::string();
-    *string_buf = model_proto->SerializeAsString();
+      *string_buf = model_proto->SerializeAsString();
 
-    model_protos_.emplace(fused_node.Name(), string_buf);
+      model_protos_.emplace(fused_node.Name(), string_buf);
+      model_opset_version_ = graph.DomainToVersionMap().at(kOnnxDomain);
+    }
+
     NodeComputeInfo compute_info;
-
     subgraph_serial_number_ = 0;
 
     compute_info.create_state_func = [&](ComputeContext* context, FunctionState* state)
@@ -599,7 +600,7 @@ Status TidlExecutionProvider::Compile(const std::vector<FusedNodeAndGraph>& fuse
       if(is_import_)
       {
         std::string * string_buf = reinterpret_cast<std::string *>(state_subGraph->string_buf);
-        status = tidl_ops_->TIDL_computeImportFunc(state_subGraph, string_buf, graph.DomainToVersionMap().at(kOnnxDomain));
+        status = tidl_ops_->TIDL_computeImportFunc(state_subGraph, string_buf, model_opset_version_);
         if(status != 0)
           return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "TIDL Compute Import Failed.");
       }

@@ -77,5 +77,6 @@ class TidlExecutionProvider : public IExecutionProvider {
   tidl_ops * tidl_ops_ = new tidl_ops;
   int32_t is_import_;
   int32_t subgraph_serial_number_;
+  int8_t model_opset_version_;
 };
 }  // namespace onnxruntime
