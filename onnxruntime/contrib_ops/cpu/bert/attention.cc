@@ -71,7 +71,7 @@ bool Attention<T>::IsPackWeightsSuccessful(int qkv_index,
                                            const T* weights_data,
                                            size_t weight_matrix_col_size,
                                            /*out*/ PrePackedWeights* prepacked_weights) {
-  size_t packb_size = MlasGemmPackBSize(head_size, input_hidden_size);
+  size_t packb_size = MlasGemmPackBSize(CblasNoTrans, CblasNoTrans, head_size, input_hidden_size);
   if (packb_size == 0) {
     return false;
   }
@@ -87,7 +87,7 @@ bool Attention<T>::IsPackWeightsSuccessful(int qkv_index,
   memset(packed_weights_data, 0, packed_weights_data_size);
 
   for (size_t i = 0; i < loop_len; i++) {
-    MlasGemmPackB(CblasNoTrans, head_size, input_hidden_size, weights_data, weight_matrix_col_size, packed_weights_data);
+    MlasGemmPackB(CblasNoTrans, CblasNoTrans, head_size, input_hidden_size, weights_data, weight_matrix_col_size, packed_weights_data);
     packed_weights_data += packb_size;
     weights_data += head_size;
   }
@@ -198,7 +198,7 @@ Status Attention<T>::Compute(OpKernelContext* context) const {
 
   const Tensor* mask_index = context->Input<Tensor>(3);
   const Tensor* past = context->Input<Tensor>(4);
-  const Tensor* relative_position_bias = context->Input<Tensor>(5);
+  const Tensor* attention_bias = context->Input<Tensor>(5);
 
   const TensorShape& weights_shape = (weights ? weights->Shape() : weight_shape_);
 
@@ -208,7 +208,7 @@ Status Attention<T>::Compute(OpKernelContext* context) const {
                                   bias->Shape(),
                                   mask_index,
                                   past,
-                                  relative_position_bias,
+                                  attention_bias,
                                   &parameters));
 
   if (parameters.do_rotary) {
@@ -335,10 +335,10 @@ Status Attention<T>::Compute(OpKernelContext* context) const {
 
   // Compute the attention score and apply the score to V
   return ApplyAttention(Q, K, V, mask_index, past, nullptr /* past_key */, nullptr /* past_value */,
-                        output, nullptr /* present_key */, nullptr /* present_value */,
+                        output, nullptr /* present_key */, nullptr /* present_value */, nullptr /* output_qk */,
                         batch_size, sequence_length, sequence_length,
                         parameters.head_size, parameters.v_head_size, parameters.v_hidden_size,
-                        relative_position_bias, context);
+                        attention_bias, context);
 }
 }  // namespace contrib
 }  // namespace onnxruntime

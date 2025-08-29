@@ -1,16 +1,11 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "core/providers/common.h"
-#include "core/providers/shared/utils/utils.h"
+#include "core/providers/qnn/builder/opbuilder/base_op_builder.h"
 #include "core/providers/qnn/builder/qnn_utils.h"
 #include "core/providers/qnn/builder/qnn_model_wrapper.h"
 #include "core/providers/qnn/builder/op_builder_factory.h"
 #include "core/providers/cpu/tensor/slice_helper.h"
-#include "core/providers/qnn/builder/op_builder_factory.h"
-#include "core/common/safeint.h"
-
-#include "core/providers/qnn/builder/opbuilder/base_op_builder.h"
 
 namespace onnxruntime {
 namespace qnn {
@@ -85,10 +80,10 @@ Status SplitOpBuilder::ProcessAttributesAndOutputs(QnnModelWrapper& qnn_model_wr
   std::vector<uint32_t> split_index;
   if (node_unit.Inputs().size() > 1) {
     auto& input_name = node_unit.Inputs()[1].node_arg.Name();
-    bool is_initializer_input = qnn_model_wrapper.IsInitializerInput(input_name);
-    if (is_initializer_input) {
+    bool is_constant_input = qnn_model_wrapper.IsConstantInput(input_name);
+    if (is_constant_input) {
       std::vector<uint8_t> unpacked_tensor;
-      const auto& input_tensor = qnn_model_wrapper.GetInitializerTensors().at(input_name);
+      const auto& input_tensor = qnn_model_wrapper.GetConstantTensor(input_name);
       ORT_RETURN_IF_ERROR(qnn_model_wrapper.UnpackInitializerData(*input_tensor, unpacked_tensor));
       const int64_t* tensor_data = reinterpret_cast<const int64_t*>(unpacked_tensor.data());
       size_t tensor_byte_size = unpacked_tensor.size();
@@ -110,7 +105,7 @@ Status SplitOpBuilder::ProcessAttributesAndOutputs(QnnModelWrapper& qnn_model_wr
     std::vector<uint32_t> input_shape;
     ORT_RETURN_IF_NOT(qnn_model_wrapper.GetOnnxShape(node_unit.Inputs()[0].node_arg, input_shape),
                       "Cannot get shape");
-    ORT_ENFORCE(static_cast<int32_t>(input_shape.size()) > axis_value, "axis not valid!");
+    ORT_RETURN_IF_NOT(static_cast<int32_t>(input_shape.size()) > axis_value, "axis not valid!");
     ORT_RETURN_IF_NOT(input_shape.at(axis_value) > 0, "Shape value not valid!");
 
     // ONNX spec states that if not evenly divisible by `num_outputs`, the last chunk is smaller.

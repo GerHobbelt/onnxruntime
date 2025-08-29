@@ -5,15 +5,10 @@
 #include <cmath>
 #include <utility>
 
-#include "core/providers/common.h"
-#include "core/providers/shared/utils/utils.h"
-#include "core/framework/float16.h"
-#include "core/framework/tensorprotoutils.h"
+#include "core/providers/qnn/builder/opbuilder/base_op_builder.h"
 #include "core/providers/qnn/builder/qnn_model_wrapper.h"
 #include "core/providers/qnn/builder/qnn_utils.h"
 #include "core/providers/qnn/builder/op_builder_factory.h"
-
-#include "base_op_builder.h"
 
 namespace onnxruntime {
 namespace qnn {
@@ -392,15 +387,23 @@ class BatchNormOpBuilder : public BaseOpBuilder {
                      const double rmin,
                      QnnQuantParamsWrapper& quant_param,
                      std::vector<uint8_t>& raw_tensor) const {
+    bool symmetric = false;
     if (info.quant_param.IsQuantized()) {
-      raw_tensor.resize(double_tensor.size());
+      size_t data_size = double_tensor.size();
+      // QNN BatchNorm int32 bias requires symmetric quantizated
+      if (info.qnn_data_type == QNN_DATATYPE_SFIXED_POINT_32) {
+        data_size *= sizeof(int32_t);
+        symmetric = true;
+      }
+      raw_tensor.resize(data_size);
       float scale = 0.0f;
-      int zero_point = 0;
+      int32_t zero_point = 0;
       ORT_RETURN_IF_ERROR(utils::GetQuantParams(static_cast<float>(rmin),
                                                 static_cast<float>(rmax),
                                                 info.qnn_data_type,
                                                 scale,
-                                                zero_point));
+                                                zero_point,
+                                                symmetric));
       quant_param = QnnQuantParamsWrapper(scale, zero_point);
       for (size_t i = 0; i < double_tensor.size(); ++i) {
         // onnx only supports 8 bits quantization
@@ -411,6 +414,10 @@ class BatchNormOpBuilder : public BaseOpBuilder {
         } else if (info.qnn_data_type == QNN_DATATYPE_SFIXED_POINT_8) {
           int8_t quant_value = static_cast<int8_t>(quant_value_int);
           raw_tensor[i] = *reinterpret_cast<uint8_t*>(&quant_value);
+        } else if (info.qnn_data_type == QNN_DATATYPE_SFIXED_POINT_32) {
+          int32_t quant_value = static_cast<int32_t>(quant_value_int);
+          size_t pos = i * sizeof(int32_t);
+          std::memcpy(&raw_tensor[pos], reinterpret_cast<uint8_t*>(&quant_value), sizeof(int32_t));
         } else {
           // TODO(adrianlizarraga): Should support 16-bit quantization as well.
           ORT_RETURN_IF(true, "Qnn Data Type: %d not supported yet.", info.qnn_data_type);
@@ -421,6 +428,13 @@ class BatchNormOpBuilder : public BaseOpBuilder {
     }
     return Status::OK();
   }
+
+ protected:
+  Status CheckCpuDataTypes(const std::vector<Qnn_DataType_t> in_dtypes,
+                           const std::vector<Qnn_DataType_t> out_dtypes) const override ORT_MUST_USE_RESULT;
+
+  Status CheckHtpDataTypes(const std::vector<Qnn_DataType_t> in_dtypes,
+                           const std::vector<Qnn_DataType_t> out_dtypes) const override ORT_MUST_USE_RESULT;
 };
 
 // BatchNorm is sensitive with data layout, no special validation so far
@@ -434,31 +448,30 @@ Status BatchNormOpBuilder::IsOpSupported(QnnModelWrapper& qnn_model_wrapper,
     // Still do it here so hopefully QNN Op validation API can tell us some details why it's not supported
     return AddToModelBuilder(qnn_model_wrapper, node_unit, logger, true);
   } else {
-    const auto& inputs = node_unit.Inputs();
-    ORT_ENFORCE(inputs.size() == 5, "5 input expected per BatchNorm Onnx Spec.");
+    // Check input datatype. Can't use Qnn Op validation API since it's before layout transformation
+    ORT_RETURN_IF_ERROR(ProcessDataTypes(qnn_model_wrapper, node_unit));
 
-    // Check input type is float for CPU. Can't use Qnn Op validation API since it's before layout transformation
-    ORT_RETURN_IF_ERROR(DataTypeCheckForCpuBackend(qnn_model_wrapper, inputs[0].node_arg.Type()));
+    const auto& inputs = node_unit.Inputs();
+    ORT_RETURN_IF_NOT(inputs.size() == 5, "5 input expected per BatchNorm Onnx Spec.");
 
     std::vector<uint32_t> input_shape;
     ORT_RETURN_IF_NOT(qnn_model_wrapper.GetOnnxShape(inputs[0].node_arg, input_shape), "Cannot get shape of input 0.");
     const size_t input_rank = input_shape.size();
 
-    ORT_RETURN_IF(input_rank <= 2 || input_rank > 4,
-                  "QNN BatchNorm only supports input ranks of size 3 or 4.");
+    ORT_RETURN_IF(input_rank > 4, "QNN BatchNorm only supports input ranks of size <= 4.");
 
     const uint32_t num_channels = input_shape[1];
 
     std::vector<uint32_t> scale_shape;
     ORT_RETURN_IF_NOT(qnn_model_wrapper.GetOnnxShape(inputs[1].node_arg, scale_shape), "Cannot get shape of input 1 (scale).");
-    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsInitializerInput(inputs[1].node_arg.Name()),
+    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsConstantInput(inputs[1].node_arg.Name()),
                       "QNN BatchNorm doesn't support dynamic scale.");
     ORT_RETURN_IF(scale_shape.size() != 1 || scale_shape[0] != num_channels,
                   "QNN BatchNorm input 1 (scale) must have 1D shape [channel].");
 
     std::vector<uint32_t> bias_shape;
     ORT_RETURN_IF_NOT(qnn_model_wrapper.GetOnnxShape(inputs[2].node_arg, bias_shape), "Cannot get shape of input 2 (bias).");
-    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsInitializerInput(inputs[2].node_arg.Name()),
+    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsConstantInput(inputs[2].node_arg.Name()),
                       "QNN BatchNorm doesn't support dynamic bias.");
 
     ORT_RETURN_IF(bias_shape.size() != 1 || bias_shape[0] != num_channels,
@@ -468,14 +481,14 @@ Status BatchNormOpBuilder::IsOpSupported(QnnModelWrapper& qnn_model_wrapper,
     ORT_RETURN_IF_NOT(qnn_model_wrapper.GetOnnxShape(inputs[3].node_arg, mean_shape), "Cannot get shape of input 3 (mean).");
     ORT_RETURN_IF(mean_shape.size() != 1 || mean_shape[0] != num_channels,
                   "QNN BatchNorm input 3 (mean) must have 1D shape [channel].");
-    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsInitializerInput(inputs[3].node_arg.Name()),
+    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsConstantInput(inputs[3].node_arg.Name()),
                       "QNN BatchNorm doesn't support dynamic mean.");
 
     std::vector<uint32_t> var_shape;
     ORT_RETURN_IF_NOT(qnn_model_wrapper.GetOnnxShape(inputs[4].node_arg, var_shape), "Cannot get shape of input 4 (var).");
     ORT_RETURN_IF(var_shape.size() != 1 || var_shape[0] != num_channels,
                   "QNN BatchNorm input 4 (var) must have 1D shape [channel].");
-    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsInitializerInput(inputs[4].node_arg.Name()),
+    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsConstantInput(inputs[4].node_arg.Name()),
                       "QNN BatchNorm doesn't support dynamic var.");
 
     ORT_RETURN_IF(node_unit.Outputs().size() > 1, "QNN BatchNorm only support 1 output.");
@@ -578,7 +591,7 @@ Status BatchNormOpBuilder::ProcessInputs(QnnModelWrapper& qnn_model_wrapper,
                                       scale_rmin,
                                       scale_quant_param,
                                       scale_raw_tensor));
-      Qnn_TensorType_t scale_tensor_type = GetInputTensorType(qnn_model_wrapper, scale_name);
+      Qnn_TensorType_t scale_tensor_type = qnn_model_wrapper.GetTensorType(scale_name);
       QnnTensorWrapper input_tensorwrapper(scale_name, scale_tensor_type, scale_info.qnn_data_type,
                                            std::move(scale_quant_param), std::move(scale_info.shape),
                                            std::move(scale_raw_tensor));
@@ -595,7 +608,7 @@ Status BatchNormOpBuilder::ProcessInputs(QnnModelWrapper& qnn_model_wrapper,
                                       bias_rmin,
                                       bias_quant_param,
                                       bias_raw_tensor));
-      Qnn_TensorType_t bias_tensor_type = GetInputTensorType(qnn_model_wrapper, bias_name);
+      Qnn_TensorType_t bias_tensor_type = qnn_model_wrapper.GetTensorType(bias_name);
       QnnTensorWrapper input_tensorwrapper(bias_name, bias_tensor_type, bias_info.qnn_data_type,
                                            std::move(bias_quant_param), std::move(bias_info.shape),
                                            std::move(bias_raw_tensor));
@@ -610,6 +623,62 @@ Status BatchNormOpBuilder::ProcessInputs(QnnModelWrapper& qnn_model_wrapper,
 void CreateBatchNormOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations) {
   op_registrations.AddOpBuilder(op_type, std::make_unique<BatchNormOpBuilder>());
 }
+
+Status BatchNormOpBuilder::CheckCpuDataTypes(const std::vector<Qnn_DataType_t> in_dtypes,
+                                             const std::vector<Qnn_DataType_t> out_dtypes) const {
+  bool is_supported_dtype = false;
+  // in_dtypes: [X, scale, B, input_mean, input_var]
+  std::vector<Qnn_DataType_t> all_dtypes(in_dtypes.begin(), in_dtypes.begin() + 3);
+  // out_dtypes: [Y, running_mean, running_var]
+  all_dtypes.insert(all_dtypes.end(), out_dtypes.begin(), out_dtypes.begin() + 1);
+  // FP32
+  if (
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_FLOAT_32, QNN_DATATYPE_FLOAT_32, QNN_DATATYPE_FLOAT_32, QNN_DATATYPE_FLOAT_32})) {
+    is_supported_dtype = true;
+  }
+  // INT8
+  else if (
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_8}) ||
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_SFIXED_POINT_32, QNN_DATATYPE_UFIXED_POINT_8})) {
+    is_supported_dtype = true;
+  }
+  ORT_RETURN_IF_NOT(is_supported_dtype, "QNN Batchnorm unsupported datatype on CPU.");
+  return Status::OK();
+}
+
+Status BatchNormOpBuilder::CheckHtpDataTypes(const std::vector<Qnn_DataType_t> in_dtypes,
+                                             const std::vector<Qnn_DataType_t> out_dtypes) const {
+  bool is_supported_dtype = false;
+  // in_dtypes: [X, scale, B, input_mean, input_var]
+  std::vector<Qnn_DataType_t> all_dtypes(in_dtypes.begin(), in_dtypes.begin() + 3);
+  // out_dtypes: [Y, running_mean, running_var]
+  all_dtypes.insert(all_dtypes.end(), out_dtypes.begin(), out_dtypes.begin() + 1);
+  // FP16
+  if (
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_FLOAT_16, QNN_DATATYPE_FLOAT_16, QNN_DATATYPE_FLOAT_16, QNN_DATATYPE_FLOAT_16}) ||
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_FLOAT_32, QNN_DATATYPE_FLOAT_32, QNN_DATATYPE_FLOAT_32, QNN_DATATYPE_FLOAT_32})) {
+    is_supported_dtype = true;
+  }
+  // INT16
+  else if (
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_16, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_16}) ||
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_16, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_SFIXED_POINT_32, QNN_DATATYPE_UFIXED_POINT_16}) ||
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_16, QNN_DATATYPE_UFIXED_POINT_16, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_16}) ||
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_16, QNN_DATATYPE_UFIXED_POINT_16, QNN_DATATYPE_SFIXED_POINT_32, QNN_DATATYPE_UFIXED_POINT_16}) ||
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_16, QNN_DATATYPE_SFIXED_POINT_16, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_16}) ||
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_16, QNN_DATATYPE_SFIXED_POINT_16, QNN_DATATYPE_SFIXED_POINT_32, QNN_DATATYPE_UFIXED_POINT_16})) {
+    is_supported_dtype = true;
+  }
+  // INT8
+  else if (
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_8}) ||
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_UFIXED_POINT_8, QNN_DATATYPE_SFIXED_POINT_32, QNN_DATATYPE_UFIXED_POINT_8}) ||
+      (all_dtypes == std::vector<Qnn_DataType_t>{QNN_DATATYPE_SFIXED_POINT_8, QNN_DATATYPE_SFIXED_POINT_8, QNN_DATATYPE_SFIXED_POINT_8, QNN_DATATYPE_SFIXED_POINT_8})) {
+    is_supported_dtype = true;
+  }
+  ORT_RETURN_IF_NOT(is_supported_dtype, "QNN Batchnorm unsupported datatype on HTP.");
+  return Status::OK();
+};
 
 }  // namespace qnn
 }  // namespace onnxruntime

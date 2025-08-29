@@ -1,11 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "group_query_attention.h"
-#include "group_query_attention_helper.h"
-#include "attention_utils.h"
-#include "rotary_embedding.h"
-#include "rotary_embedding_helper.h"
+#include "contrib_ops/cpu/bert/group_query_attention.h"
+#include "contrib_ops/cpu/bert/group_query_attention_helper.h"
+#include "contrib_ops/cpu/bert/rotary_helper.h"
+#include "contrib_ops/cpu/bert/attention_utils.h"
+#include "contrib_ops/cpu/bert/rotary_embedding.h"
+#include "contrib_ops/cpu/bert/rotary_embedding_helper.h"
 
 #include "core/framework/tensorprotoutils.h"
 #include "core/graph/onnx_protobuf.h"
@@ -21,31 +22,24 @@ namespace onnxruntime {
 namespace contrib {
 
 // These ops are internal-only, so register outside of onnx
-ONNX_OPERATOR_TYPED_KERNEL_EX(
-    GroupQueryAttention,
-    kMSDomain,
-    1,
-    float,
-    kCpuExecutionProvider,
-    KernelDefBuilder()
-        .TypeConstraint("T", DataTypeImpl::GetTensorType<float>())
-        .TypeConstraint("M", DataTypeImpl::GetTensorType<int32_t>()),
-    GroupQueryAttention<float>);
+#define REGISTER_KERNEL_TYPED(T)                                        \
+  ONNX_OPERATOR_TYPED_KERNEL_EX(                                        \
+      GroupQueryAttention,                                              \
+      kMSDomain,                                                        \
+      1,                                                                \
+      T,                                                                \
+      kCpuExecutionProvider,                                            \
+      KernelDefBuilder()                                                \
+          .TypeConstraint("T", DataTypeImpl::GetTensorType<T>())        \
+          .TypeConstraint("M", DataTypeImpl::GetTensorType<int32_t>()), \
+      GroupQueryAttention<T>);
+
+REGISTER_KERNEL_TYPED(float)
+REGISTER_KERNEL_TYPED(MLFloat16)
 
 template <typename T>
-GroupQueryAttention<T>::GroupQueryAttention(const OpKernelInfo& info) : OpKernel(info), GQAAttentionBase(info, false) {
-  int64_t num_heads = 0;
-  int64_t kv_num_heads = 0;
-  ORT_ENFORCE(info.GetAttr("num_heads", &num_heads).IsOK() && num_heads > 0);
-  ORT_ENFORCE(info.GetAttr("kv_num_heads", &kv_num_heads).IsOK() && kv_num_heads > 0);
-  num_heads_ = static_cast<int>(num_heads);
-  kv_num_heads_ = static_cast<int>(kv_num_heads);
-
-  mask_filter_value_ = info.GetAttrOrDefault<float>("mask_filter_value", -10000.0f);
-  local_window_size_ = static_cast<int>(info.GetAttrOrDefault<int64_t>("local_window_size", -1));
-  do_rotary_ = info.GetAttrOrDefault<int64_t>("do_rotary", 0) == 1;
-  rotary_interleaved_ = info.GetAttrOrDefault<int64_t>("rotary_interleaved", 0) == 1;
-}
+GroupQueryAttention<T>::GroupQueryAttention(const OpKernelInfo& info)
+    : OpKernel(info), GQAAttentionBase(info, true) {}
 
 template <typename T>
 Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
@@ -55,12 +49,14 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
   const Tensor* past_key = context->Input<Tensor>(3);
   const Tensor* past_value = context->Input<Tensor>(4);
   const Tensor* seqlens_k = context->Input<Tensor>(5);
-  const Tensor* total_seqlen = context->Input<Tensor>(6);
+  const Tensor* total_seqlen_tensor = context->Input<Tensor>(6);
   const Tensor* cos_cache = context->Input<Tensor>(7);
   const Tensor* sin_cache = context->Input<Tensor>(8);
+  const Tensor* position_ids = context->Input<Tensor>(9);
+  const Tensor* attention_bias = context->Input<Tensor>(10);
+  const Tensor* head_sink = context->Input<Tensor>(11);
 
   GroupQueryAttentionParameters parameters = {};
-  constexpr float scale = 1.0f;
   ORT_RETURN_IF_ERROR(group_query_attention_helper::CheckInputs(query,
                                                                 key,
                                                                 value,
@@ -72,8 +68,14 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
                                                                 num_heads_,
                                                                 kv_num_heads_,
                                                                 seqlens_k,
-                                                                total_seqlen,
-                                                                scale));
+                                                                total_seqlen_tensor,
+                                                                scale_,
+                                                                softcap_));
+
+  ORT_RETURN_IF_ERROR(group_query_attention_helper::CheckCustomAttentionInputs(position_ids,
+                                                                               attention_bias,
+                                                                               head_sink,
+                                                                               parameters));
 
   const int batch_size = parameters.batch_size;
   const int sequence_length = parameters.sequence_length;
@@ -93,6 +95,11 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
   Tensor* present_k = context->Output(1, present_k_shape);
   Tensor* present_v = context->Output(2, present_v_shape);
 
+  std::vector<int64_t> output_qk_shape{static_cast<int64_t>(batch_size), static_cast<int64_t>(num_heads_), static_cast<int64_t>(parameters.sequence_length), static_cast<int64_t>(parameters.total_sequence_length)};
+  Tensor* output_qk = context->Output(3, output_qk_shape);
+
+  ORT_RETURN_IF_ERROR(group_query_attention_helper::CheckOutputs(output_qk, qk_output_));
+
   AllocatorPtr allocator;
   ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&allocator));
 
@@ -103,20 +110,22 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
   if (packed_qkv) {
     ORT_RETURN_IF_ERROR(MaybeTransposeToBNSH<T>(
         allocator, batch_size, num_heads_ + 2 * kv_num_heads_, sequence_length, head_size, query, Q));
-  } else if (sequence_length > 1) {
+  } else {
     ORT_RETURN_IF_ERROR(MaybeTransposeToBNSH<T>(
         allocator, batch_size, num_heads_, sequence_length, head_size, query, Q));
     ORT_RETURN_IF_ERROR(MaybeTransposeToBNSH<T>(
         allocator, batch_size, kv_num_heads_, sequence_length, head_size, key, K));
     ORT_RETURN_IF_ERROR(MaybeTransposeToBNSH<T>(
         allocator, batch_size, kv_num_heads_, sequence_length, head_size, value, V));
-  } else {
-    Tensor::InitOrtValue(std::move(const_cast<Tensor&>(*query)), Q);
-    Tensor::InitOrtValue(std::move(const_cast<Tensor&>(*key)), K);
-    Tensor::InitOrtValue(std::move(const_cast<Tensor&>(*value)), V);
   }
 
+  OrtValue RotaryQKV;
+  OrtValue RotaryQ;
+  OrtValue RotaryK;
+  T* q_rotary = Q.GetMutable<Tensor>()->MutableData<T>();
+  T* k_rotary = packed_qkv ? nullptr : K.GetMutable<Tensor>()->MutableData<T>();
   if (do_rotary_) {
+    // Initialize rotary parameters
     rotary_embedding_helper::RotaryParameters rotary_params = {};
     rotary_params.batch_size = batch_size;
     rotary_params.sequence_length = sequence_length;
@@ -128,43 +137,53 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
     rotary_params.seq_stride = head_size;
     rotary_params.head_stride = sequence_length * rotary_params.seq_stride;
     rotary_params.batch_stride = (packed_qkv ? (num_heads_ + 2 * kv_num_heads_) : num_heads_) * rotary_params.head_stride;
-    rotary_params.position_ids_format = sequence_length == 1 ? 1 : 0;
+    rotary_params.position_ids_format = !parameters.is_first_prompt ? 1 : 0;
     rotary_params.transposed = true;
     auto* tp = context->GetOperatorThreadPool();
-    std::vector<int64_t> pos_ids(sequence_length == 1 ? batch_size : 1);
-    if (sequence_length == 1) {
-      for (int b = 0; b < batch_size; b++) {
-        pos_ids[b] = static_cast<int64_t>(seqlens_k->Data<int32_t>()[b]);
-      }
+    // Generate position ids
+    const int pos_ids_size = parameters.is_first_prompt ? 1 : batch_size * sequence_length;
+    std::vector<int64_t> default_pos_ids(pos_ids_size);
+    const int64_t* pos_ids_data = default_pos_ids.data();
+
+    if (position_ids != nullptr) {
+      pos_ids_data = position_ids->Data<int64_t>();
+    } else if (parameters.is_first_prompt) {
+      default_pos_ids[0] = static_cast<int64_t>(0);
     } else {
-      pos_ids[0] = static_cast<int64_t>(0);
+      // Note: As of now, continuous decoding supports only batch size 1 and token generation supports only sequence length 1.
+      for (int b = 0; b < batch_size; b++) {
+        const int total_seqlen = seqlens_k->Data<int32_t>()[b] + 1;
+        const int past_seqlen = total_seqlen - sequence_length;
+        for (int s = 0; s < sequence_length; s++) {
+          if (past_seqlen + s < total_seqlen) {
+            default_pos_ids[b * sequence_length + s] = static_cast<int64_t>(past_seqlen) + s;
+          } else {
+            default_pos_ids[b * sequence_length + s] = static_cast<int64_t>(1);
+          }
+        }
+      }
     }
+
+    // Initialize separate buffers for rotary embeddings
     const T* q_input;
     const T* k_input;
-    T* q_rotary;
-    T* k_rotary;
     if (packed_qkv) {
-      OrtValue RotaryQKV;
       Tensor::InitOrtValue(element_type, TensorShape({batch_size, num_heads_ + 2 * kv_num_heads_, sequence_length, head_size}), allocator, RotaryQKV);
       q_input = Q.Get<Tensor>().Data<T>();
       k_input = q_input + num_heads_ * sequence_length * head_size;
       q_rotary = RotaryQKV.GetMutable<Tensor>()->MutableData<T>();
       k_rotary = q_rotary + num_heads_ * sequence_length * head_size;
-      Q = RotaryQKV;
     } else {
-      OrtValue RotaryQ;
       Tensor::InitOrtValue(element_type, TensorShape({batch_size, num_heads_, sequence_length, head_size}), allocator, RotaryQ);
-      OrtValue RotaryK;
       Tensor::InitOrtValue(element_type, TensorShape({batch_size, kv_num_heads_, sequence_length, head_size}), allocator, RotaryK);
       q_input = Q.Get<Tensor>().Data<T>();
       k_input = K.Get<Tensor>().Data<T>();
       q_rotary = RotaryQ.GetMutable<Tensor>()->MutableData<T>();
       k_rotary = RotaryK.GetMutable<Tensor>()->MutableData<T>();
-      Q = RotaryQ;
-      K = RotaryK;
     }
+    // Run rotary embedding for Q and K
     ORT_RETURN_IF_ERROR(RunRotaryEmbedding<T>(tp, rotary_params, q_input,
-                                              pos_ids.data(), cos_cache->Data<T>(),
+                                              pos_ids_data, cos_cache->Data<T>(),
                                               sin_cache->Data<T>(), q_rotary, rotary_interleaved_));
 
     rotary_params.num_heads = kv_num_heads_;
@@ -173,20 +192,31 @@ Status GroupQueryAttention<T>::Compute(OpKernelContext* context) const {
       rotary_params.batch_stride = kv_num_heads_ * rotary_params.head_stride;
     }
     ORT_RETURN_IF_ERROR(RunRotaryEmbedding<T>(tp, rotary_params, k_input,
-                                              pos_ids.data(), cos_cache->Data<T>(),
+                                              pos_ids_data, cos_cache->Data<T>(),
                                               sin_cache->Data<T>(), k_rotary, rotary_interleaved_));
+    // Pack V into rotary QKV buffer
     if (packed_qkv) {
       const T* v_input = k_input + kv_num_heads_ * sequence_length * head_size;
       T* v_rotary = k_rotary + kv_num_heads_ * sequence_length * head_size;
-      ORT_RETURN_IF_ERROR(group_query_attention_helper::PackVIntoRotaryQKV<T>(tp, parameters, v_input, v_rotary));
+      ORT_RETURN_IF_ERROR(rotary_helper::PackVIntoRotaryQKV<T>(tp,
+                                                               parameters.batch_size,
+                                                               parameters.sequence_length,
+                                                               parameters.num_heads,
+                                                               parameters.kv_num_heads,
+                                                               parameters.head_size,
+                                                               v_input,
+                                                               v_rotary));
     }
   }
 
   ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&allocator));
+
+  const T* head_sink_data = (head_sink != nullptr) ? head_sink->Data<T>() : nullptr;
+
   // Compute the attention score and apply the score to V
-  return ApplyAttention(Q.Get<Tensor>().Data<T>(), packed_qkv ? nullptr : K.Get<Tensor>().Data<T>(),
-                        packed_qkv ? nullptr : V.Get<Tensor>().Data<T>(), past_key, past_value, output, present_k, present_v,
-                        seqlens_k, parameters, allocator, context);
+  return ApplyAttention(q_rotary, packed_qkv ? nullptr : k_rotary, packed_qkv ? nullptr : V.Get<Tensor>().Data<T>(),
+                        head_sink_data, attention_bias, past_key, past_value, output, present_k, present_v,
+                        output_qk, seqlens_k, parameters, allocator, context);
 }
 }  // namespace contrib
 }  // namespace onnxruntime

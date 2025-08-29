@@ -38,7 +38,7 @@ struct CudaNotification : public synchronize::Notification {
 
   void Activate() override {
     // record event with cudaEventBlockingSync so we can support sync on host without busy wait.
-    CUDA_CALL_THROW(cudaEventRecord(event_, static_cast<cudaStream_t>(stream_.GetHandle())));
+    CUDA_CALL_THROW(cudaEventRecord(event_, static_cast<cudaStream_t>(GetStream().GetHandle())));
   }
 
   void wait_on_device(Stream& device_stream) {
@@ -81,6 +81,9 @@ CudaStream::CudaStream(cudaStream_t stream,
     cudnn_handle_ = external_cudnn_handle;
     CUDNN_CALL_THROW(cudnnSetStream(cudnn_handle_, stream));
   }
+#else
+  (void)(external_cudnn_handle);
+  (void)(external_cublas_handle);
 #endif
 }
 
@@ -176,7 +179,7 @@ Status CudaStream::CleanUpOnRunEnd() {
 }
 
 void* CudaStream::GetResource(int version, int id) const {
-  ORT_ENFORCE(version <= ORT_CUDA_RESOUCE_VERSION, "resource version unsupported!");
+  ORT_ENFORCE(version <= ORT_CUDA_RESOURCE_VERSION, "resource version unsupported!");
   void* resource{};
   switch (id) {
     case CudaResource::cuda_stream_t:
@@ -212,6 +215,9 @@ void* CudaStream::GetResource(int version, int id) const {
     case CudaResource::prefer_nhwc_t:
       return reinterpret_cast<void*>(ep_info_.prefer_nhwc);
       break;
+    case CudaResource::fuse_conv_bias_t:
+      return reinterpret_cast<void*>(ep_info_.fuse_conv_bias);
+      break;
     case CudaResource::use_tf32_t:
       return reinterpret_cast<void*>(ep_info_.use_tf32);
       break;
@@ -222,11 +228,12 @@ void* CudaStream::GetResource(int version, int id) const {
 }
 
 // CPU Stream command handles
-void WaitCudaNotificationOnDevice(Stream& stream, synchronize::Notification& notification) {
-  static_cast<CudaNotification*>(&notification)->wait_on_device(stream);
+void WaitCudaNotificationOnDevice(Stream* stream, synchronize::Notification& notification) {
+  assert(stream != nullptr);  // should never happen
+  static_cast<CudaNotification*>(&notification)->wait_on_device(*stream);
 }
 
-void WaitCudaNotificationOnHost(Stream& /*stream*/, synchronize::Notification& notification) {
+void WaitCudaNotificationOnHost(Stream* /*stream*/, synchronize::Notification& notification) {
   static_cast<CudaNotification*>(&notification)->wait_on_host();
 }
 
@@ -260,6 +267,7 @@ void RegisterCudaStreamHandles(IStreamCommandHandleRegistry& stream_handle_regis
                                                                 ep_info](const OrtDevice& device) {
       return std::make_unique<CudaStream>(external_stream, device, cpu_allocator, release_cpu_buffer_on_cuda_stream, false, external_cudnn_handle, external_cublas_handle, ep_info);
     });
+  stream_handle_registry.RegisterSetDeviceFn(device_type, [](OrtDevice::DeviceId id) { CUDA_CALL_THROW(cudaSetDevice(id)); });
 }
 
 }  // namespace onnxruntime

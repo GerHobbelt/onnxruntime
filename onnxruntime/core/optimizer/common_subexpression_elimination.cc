@@ -421,7 +421,13 @@ Status CommonSubexpressionElimination::ApplyImpl(Graph& graph, bool& modified, i
 
   for (NodeIndex node_index : node_topology_list) {
     Node* node = graph.GetNode(node_index);
-    if (node == nullptr)
+
+    // In the context of a model containing EPContext nodes, it's highly unlikely that two EPContext nodes will
+    // produce the same results.
+    // Furthermore, the EquivalenceClass constructor includes the node and all its attributes in the hash calculation,
+    // which can be particularly time-consuming when the "ep_cache_context" attribute contains a large binary blob.
+    // Therefore, EPContext nodes are excluded from this process.
+    if (node == nullptr || node->OpType() == "EPContext")
       continue;
 
     ORT_RETURN_IF_ERROR(Recurse(*node, modified, graph_level, logger));
@@ -471,7 +477,12 @@ Status CommonSubexpressionElimination::ApplyImpl(Graph& graph, bool& modified, i
 
   for (NodeIndex node_index : node_topology_list) {
     Node* node = graph.GetNode(node_index);
-    if (node == nullptr)
+    // In the context of a model containing EPContext nodes, it's highly unlikely that two EPContext nodes will
+    // produce the same results.
+    // Furthermore, the EquivalenceClass constructor includes the node and all its attributes in the hash calculation,
+    // which can be particularly time-consuming when the "ep_cache_context" attribute contains a large binary blob.
+    // Therefore, EPContext nodes are excluded from this process.
+    if (node == nullptr || node->OpType() == "EPContext")
       continue;
 
     bool node_output_replaced = false;
@@ -491,7 +502,8 @@ Status CommonSubexpressionElimination::ApplyImpl(Graph& graph, bool& modified, i
 
       if (graph_outputs.count(output_def) > 0) {
         // Currently, we don't support eliminating the graph's outputs.
-        LOGS(logger, VERBOSE) << "Not eliminating output " << output_def->Name() << " of node " << node->Name() << "[" << node->OpType() << "] because it's the graph's output.";
+        LOGS(logger, VERBOSE) << "Not eliminating output " << output_def->Name() << " of node " << node->Name()
+                              << "[" << node->OpType() << "] because it's the graph's output.";
         continue;
       }
 

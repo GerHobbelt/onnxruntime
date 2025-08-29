@@ -13,25 +13,18 @@ sys.path.append(str(_script_dir.parent))
 
 
 from package_assembly_utils import (  # noqa: E402
-    PackageVariant,
     copy_repo_relative_to_dir,
     gen_file_from_template,
+    get_podspec_values,
     load_json_config,
 )
 
 
-def get_pod_config_file(package_variant: PackageVariant):
+def get_pod_config_file():
     """
-    Gets the pod configuration file path for the given package variant.
+    Gets the pod configuration file path.
     """
-    if package_variant == PackageVariant.Full:
-        return _script_dir / "onnxruntime-c.config.json"
-    elif package_variant == PackageVariant.Mobile:
-        return _script_dir / "onnxruntime-mobile-c.config.json"
-    elif package_variant == PackageVariant.Training:
-        return _script_dir / "onnxruntime-training-c.config.json"
-    else:
-        raise ValueError(f"Unhandled package variant: {package_variant}")
+    return _script_dir / "onnxruntime-c.config.json"
 
 
 def assemble_c_pod_package(
@@ -40,7 +33,6 @@ def assemble_c_pod_package(
     framework_info_file: pathlib.Path,
     public_headers_dir: pathlib.Path,
     framework_dir: pathlib.Path,
-    package_variant: PackageVariant,
 ):
     """
     Assembles the files for the C/C++ pod package in a staging directory.
@@ -50,7 +42,6 @@ def assemble_c_pod_package(
     :param framework_info_file Path to the framework_info.json or xcframework_info.json file containing additional values for the podspec.
     :param public_headers_dir Path to the public headers directory to include in the pod.
     :param framework_dir Path to the onnxruntime framework directory to include in the pod.
-    :param package_variant The pod package variant.
     :return Tuple of (package name, path to the podspec file).
     """
     staging_dir = staging_dir.resolve()
@@ -59,7 +50,7 @@ def assemble_c_pod_package(
     framework_dir = framework_dir.resolve(strict=True)
 
     framework_info = load_json_config(framework_info_file)
-    pod_config = load_json_config(get_pod_config_file(package_variant))
+    pod_config = load_json_config(get_pod_config_file())
 
     pod_name = pod_config["name"]
 
@@ -68,23 +59,25 @@ def assemble_c_pod_package(
         print("Warning: staging directory already exists", file=sys.stderr)
 
     # copy the necessary files to the staging directory
-    shutil.copytree(framework_dir, staging_dir / framework_dir.name, dirs_exist_ok=True)
-    shutil.copytree(public_headers_dir, staging_dir / public_headers_dir.name, dirs_exist_ok=True)
+    shutil.copytree(framework_dir, staging_dir / framework_dir.name, dirs_exist_ok=True, symlinks=True)
+    shutil.copytree(public_headers_dir, staging_dir / public_headers_dir.name, dirs_exist_ok=True, symlinks=True)
     copy_repo_relative_to_dir(["LICENSE"], staging_dir)
+
+    (ios_deployment_target, macos_deployment_target, weak_framework) = get_podspec_values(framework_info)
 
     # generate the podspec file from the template
     variable_substitutions = {
         "DESCRIPTION": pod_config["description"],
         # By default, we build both "iphoneos" and "iphonesimulator" architectures, and the deployment target should be the same between these two.
-        "IOS_DEPLOYMENT_TARGET": framework_info["iphonesimulator"]["APPLE_DEPLOYMENT_TARGET"],
-        "MACOSX_DEPLOYMENT_TARGET": framework_info.get("macosx", {}).get("APPLE_DEPLOYMENT_TARGET", ""),
+        "IOS_DEPLOYMENT_TARGET": ios_deployment_target,
+        "MACOSX_DEPLOYMENT_TARGET": macos_deployment_target,
         "LICENSE_FILE": "LICENSE",
         "NAME": pod_name,
         "ORT_C_FRAMEWORK": framework_dir.name,
         "ORT_C_HEADERS_DIR": public_headers_dir.name,
         "SUMMARY": pod_config["summary"],
         "VERSION": pod_version,
-        "WEAK_FRAMEWORK": framework_info["iphonesimulator"]["WEAK_FRAMEWORK"],
+        "WEAK_FRAMEWORK": weak_framework,
     }
 
     podspec_template = _script_dir / "c.podspec.template"
@@ -129,9 +122,6 @@ def parse_args():
         required=True,
         help="Path to the onnxruntime framework directory to include in the pod.",
     )
-    parser.add_argument(
-        "--variant", choices=PackageVariant.all_variant_names(), required=True, help="Pod package variant."
-    )
 
     return parser.parse_args()
 
@@ -145,7 +135,6 @@ def main():
         framework_info_file=args.framework_info_file,
         public_headers_dir=args.public_headers_dir,
         framework_dir=args.framework_dir,
-        package_variant=PackageVariant[args.variant],
     )
 
     return 0

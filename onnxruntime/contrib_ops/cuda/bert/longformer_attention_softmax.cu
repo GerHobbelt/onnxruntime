@@ -111,7 +111,12 @@ __launch_bounds__(blockSize)
     }
   }
 
+#if CUDART_VERSION >= 12090
+  float max_block = BlockReduce(block_reduce_temp).Reduce(max_input, ::cuda::maximum());
+#else
   float max_block = BlockReduce(block_reduce_temp).Reduce(max_input, cub::Max());
+#endif
+
   if (tid == 0) {
     max_shared = max_block;
   }
@@ -136,7 +141,12 @@ __launch_bounds__(blockSize)
     }
   }
 
+#if CUDART_VERSION >= 12090
+  float sum_block = BlockReduce(block_reduce_temp).Reduce(sum_input, ::cuda::std::plus());
+#else
   float sum_block = BlockReduce(block_reduce_temp).Reduce(sum_input, cub::Sum());
+#endif
+
   if (tid == 0) {
     sum_shared = sum_block;
   }
@@ -148,7 +158,7 @@ __launch_bounds__(blockSize)
     // following the Softmax.
     //
     // For now zero-out only [row_index - 2*attention_window, row_index + 2*attention_window],
-    // we can even be more agressive and reduce the zeroing out window size since
+    // we can even be more aggressive and reduce the zeroing out window size since
     // each row has entries in 3 blocks (3*attention_window size instead of 4*attention_window)
     int zero_start = row_index - 2 * attention_window;
     if (zero_start < 0) {
@@ -221,7 +231,7 @@ Status LaunchLongformerSoftmaxSimpleKernel(
   cudaDataType_t Atype;
   cudaDataType_t Btype;
   cudaDataType_t Ctype;
-  cudaDataType_t resultType;
+  cublasComputeType_t resultType;
   cublasGemmAlgo_t algo = CUBLAS_GEMM_DEFAULT;
 
   __half one_fp16, zero_fp16;
@@ -237,7 +247,7 @@ Status LaunchLongformerSoftmaxSimpleKernel(
     Atype = CUDA_R_16F;
     Btype = CUDA_R_16F;
     Ctype = CUDA_R_16F;
-    resultType = CUDA_R_16F;
+    resultType = CUBLAS_COMPUTE_16F;
     algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
   } else {
     one_fp32 = 1.f;
@@ -248,7 +258,7 @@ Status LaunchLongformerSoftmaxSimpleKernel(
     Atype = CUDA_R_32F;
     Btype = CUDA_R_32F;
     Ctype = CUDA_R_32F;
-    resultType = CUDA_R_32F;
+    resultType = CUBLAS_COMPUTE_32F;
   }
 
   // Strided batch matrix multiply

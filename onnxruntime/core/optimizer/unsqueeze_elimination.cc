@@ -3,8 +3,11 @@
 
 #include "core/optimizer/unsqueeze_elimination.h"
 #include "core/common/logging/logging.h"
+#include "core/framework/ort_value.h"
+#include "core/framework/tensorprotoutils.h"
 #include "core/graph/graph_utils.h"
 #include "core/graph/graph.h"
+#include "core/optimizer/initializer.h"
 
 using namespace ONNX_NAMESPACE;
 using namespace onnxruntime::common;
@@ -40,6 +43,10 @@ Status UnsqueezeElimination::Apply(Graph& graph, Node& node, RewriteRuleEffect& 
   // Generate new dims.
   InlinedVector<int64_t> new_dims(output_rank, 0);
   for (int64_t axis : axes) {
+    if (static_cast<size_t>(axis) >= new_dims.size()) {
+      LOGS(logger, WARNING) << "UnsqueezeElimination cannot remove node due to invalid axes" << node.Name();
+      return Status::OK();
+    }
     new_dims[static_cast<size_t>(axis)] = 1;
   }
 
@@ -50,8 +57,11 @@ Status UnsqueezeElimination::Apply(Graph& graph, Node& node, RewriteRuleEffect& 
     }
   }
 
+  Initializer initializer(graph, tensor_proto, graph.ModelPath(), /*check_outer_scope=*/false);
+  ONNX_NAMESPACE::TensorProto new_tensor_proto;
+  initializer.ToProto(new_tensor_proto);
+
   // Update shape of tensor proto.
-  ONNX_NAMESPACE::TensorProto new_tensor_proto(tensor_proto);
   new_tensor_proto.set_name(new_name);
   new_tensor_proto.clear_dims();
 
@@ -60,9 +70,9 @@ Status UnsqueezeElimination::Apply(Graph& graph, Node& node, RewriteRuleEffect& 
   }
 
   auto& new_node_arg = graph_utils::AddInitializer(graph, new_tensor_proto);
-  // Remove the Unsqueeze node and replace it with the initializer.
   graph_utils::ReplaceNodeWithInitializer(graph, node, new_node_arg);
 
+  // Remove the Unsqueeze node and replace it with the initializer.
   rule_effect = RewriteRuleEffect::kRemovedCurrentNode;
 
   return Status::OK();

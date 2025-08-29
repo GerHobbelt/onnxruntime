@@ -4,6 +4,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <filesystem>
 
 #include "core/common/inlined_containers.h"
 #include "core/graph/graph.h"
@@ -12,7 +13,6 @@
 #include "core/framework/execution_frame.h"
 #include "core/framework/ort_value_name_idx_map.h"
 #include "core/framework/ort_value.h"
-#include "core/framework/callback.h"
 
 namespace onnxruntime {
 class DataTransferManager;
@@ -24,15 +24,17 @@ class OptimizerExecutionFrame final : public IExecutionFrame {
    public:
     Info(const std::vector<const Node*>& nodes,
          const InitializedTensorSet& initialized_tensor_set,
-         const Path& model_path,
+         const std::filesystem::path& model_path,
          const IExecutionProvider& execution_provider,
-         const std::function<bool(const std::string&)>& is_sparse_initializer_func);
+         const std::function<bool(const std::string&)>& is_sparse_initializer_func,
+         const logging::Logger& logger);
 
     Info(const std::vector<const Node*>& nodes,
          const std::unordered_map<std::string, OrtValue>& initialized_tensor_set,
-         const Path& model_path,
+         const std::filesystem::path& model_path,
          const IExecutionProvider& execution_provider,
-         const std::function<bool(const std::string&)>& is_sparse_initializer_func);
+         const std::function<bool(const std::string&)>& is_sparse_initializer_func,
+         const logging::Logger& logger);
 
     ~Info() = default;
 
@@ -75,6 +77,7 @@ class OptimizerExecutionFrame final : public IExecutionFrame {
     std::unique_ptr<NodeIndexInfo> node_index_info_;
     const IExecutionProvider& execution_provider_;
     const std::function<bool(const std::string&)>& is_sparse_initializer_func_;
+    const logging::Logger& logger_;
 
     ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(Info);
   };

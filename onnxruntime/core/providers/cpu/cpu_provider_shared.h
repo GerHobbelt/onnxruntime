@@ -38,7 +38,7 @@ struct ProviderHostCPU {
   virtual Status NonMaxSuppressionBase__PrepareCompute(OpKernelContext* ctx, PrepareContext& pc) = 0;
   virtual Status NonMaxSuppressionBase__GetThresholdsFromInputs(const PrepareContext& pc, int64_t& max_output_boxes_per_class, float& iou_threshold, float& score_threshold) = 0;
 
-#if defined(USE_CUDA) || defined(USE_ROCM)
+#if defined(USE_CUDA) || defined(USE_CUDA_PROVIDER_INTERFACE) || defined(USE_ROCM)
 
   // From cpu/tensor/size.h
   virtual Status Size__Compute(const Size* p, OpKernelContext* context) = 0;
@@ -141,7 +141,9 @@ struct ProviderHostCPU {
   virtual Status Scan__Compute(const Scan<9>* p, OpKernelContext* ctx) = 0;
   virtual Status Scan__SetupSubgraphExecutionInfo(Scan<8>* p, const SessionState& session_state, const std::string& attribute_name, const SessionState& subgraph_session_state) = 0;
   virtual Status Scan__SetupSubgraphExecutionInfo(Scan<9>* p, const SessionState& session_state, const std::string& attribute_name, const SessionState& subgraph_session_state) = 0;
-
+  virtual void UpsampleBase__AdjustOutputSizeAsPolicy(const UpsampleBase* p, TensorShapeVector& output_dims,
+                                                      gsl::span<const int64_t> input_dims,
+                                                      InlinedVector<float>& scales) const = 0;
 #ifndef DISABLE_CONTRIB_OPS
   virtual Status embed_layer_norm__CheckInputs(const OpKernelContext* context, bool quantizedVersion) = 0;
   virtual Status bias_gelu_helper__CheckInputs(const OpKernelContext* context) = 0;
@@ -161,7 +163,7 @@ struct ProviderHostCPU {
                                             const TensorShape& bias_shape,
                                             const Tensor*& mask_index,
                                             const Tensor* past,
-                                            const Tensor* relative_position_bias,
+                                            const Tensor* attention_bias,
                                             void* parameters,
                                             const int max_threads_per_block,
                                             const Tensor* past_seq_len) = 0;
@@ -202,10 +204,6 @@ struct ProviderHostCPU {
   virtual void Sampling__Init(contrib::transformers::Sampling* p, const OpKernelInfo& info) = 0;
   virtual Status Sampling__Compute(const contrib::transformers::Sampling* p, OpKernelContext* ctx) = 0;
   virtual Status Sampling__SetupSubgraphExecutionInfo(contrib::transformers::Sampling* p, const SessionState& session_state, const std::string& attribute_name, const SessionState& subgraph_session_state) = 0;
-
-  virtual void UpsampleBase__AdjustOutputSizeAsPolicy(const UpsampleBase* p, TensorShapeVector& output_dims,
-                                                      gsl::span<const int64_t> input_dims,
-                                                      InlinedVector<float>& scales) const = 0;
 
 #ifdef ENABLE_ATEN
   virtual Status ATen__Compute(const contrib::ATen* p, OpKernelContext* p_ctx) = 0;
@@ -256,7 +254,7 @@ struct ProviderHostCPU {
 
 extern ProviderHostCPU& g_host_cpu;
 
-#if defined(USE_CUDA) || defined(USE_ROCM)
+#if defined(USE_CUDA) || defined(USE_CUDA_PROVIDER_INTERFACE) || defined(USE_ROCM)
 namespace GatherElements {
 inline Status ValidateInputShapes(const TensorShape& input_data_shape,
                                   const TensorShape& indices_shape,
@@ -338,7 +336,7 @@ inline Status ExecuteTritonOpByFuncName(OpKernelContext* p_ctx, const std::strin
 }  // namespace contrib
 #endif  // ENABLE_TRITON
 
-#endif  // USE_CUDA || USE_ROCM
+#endif  // USE_CUDA || USE_CUDA_PROVIDER_INTERFACE || USE_ROCM
 #endif
 
 }  // namespace onnxruntime

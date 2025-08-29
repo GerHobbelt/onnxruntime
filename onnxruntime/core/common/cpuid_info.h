@@ -15,6 +15,14 @@ class CPUIDInfo {
     return cpuid_info;
   }
 
+  std::string_view GetCPUVendor() const {
+    return vendor_;
+  }
+
+  uint32_t GetCPUVendorId() const {
+    return vendor_id_;
+  }
+
   bool HasAMX_BF16() const { return has_amx_bf16_; }
   bool HasAVX() const { return has_avx_; }
   bool HasAVX2() const { return has_avx2_; }
@@ -25,12 +33,14 @@ class CPUIDInfo {
   bool HasSSE3() const { return has_sse3_; }
   bool HasSSE4_1() const { return has_sse4_1_; }
   bool IsHybrid() const { return is_hybrid_; }
+  bool HasTPAUSE() const { return has_tpause_; }
 
   // ARM
   bool HasArmNeonDot() const { return has_arm_neon_dot_; }
   bool HasArmNeon_I8MM() const { return has_arm_neon_i8mm_; }
   bool HasArmSVE_I8MM() const { return has_arm_sve_i8mm_; }
   bool HasArmNeon_BF16() const { return has_arm_neon_bf16_; }
+  bool HasArm_SME() const { return has_arm_sme_; }
 
   uint32_t GetCurrentCoreIdx() const;
 
@@ -61,7 +71,7 @@ class CPUIDInfo {
 
   /**
    * @brief Some ARMv8 power efficient core has narrower 64b load/store
-   *        that needs specialized optimiztion in kernels
+   *        that needs specialized optimization in kernels
    * @return whether the indicated core has narrower load/store device
    */
   bool IsCoreArmv8NarrowLd(uint32_t coreId) const {
@@ -73,7 +83,7 @@ class CPUIDInfo {
 
   /**
    * @brief Some ARMv8 power efficient core has narrower 64b load/store
-   *        that needs specialized optimiztion in kernels
+   *        that needs specialized optimization in kernels
    * @return whether the current core has narrower load/store device
    */
   bool IsCurrentCoreArmv8NarrowLd() const {
@@ -93,7 +103,40 @@ class CPUIDInfo {
   }
 
  private:
+  // Log function that uses ORT logging if available or writes to stderr.
+  // This enables us to log even before ORT logging has been initialized.
+  static void LogEarlyWarning(std::string_view message);
+
   CPUIDInfo();
+
+  void VendorInfoInit();
+
+#if defined(CPUIDINFO_ARCH_X86)
+
+  void X86Init();
+
+#elif defined(CPUIDINFO_ARCH_ARM)
+
+#if defined(__linux__)
+
+  void ArmLinuxInit();
+
+#elif defined(_WIN32)
+
+  void ArmWindowsInit();
+
+#elif defined(__APPLE__)
+
+  void ArmAppleInit();
+
+#endif
+
+#endif  // defined(CPUIDINFO_ARCH_ARM)
+
+#if defined(CPUINFO_SUPPORTED)
+  bool pytorch_cpuinfo_init_{false};
+#endif  // defined(CPUINFO_SUPPORTED)
+
   bool has_amx_bf16_{false};
   bool has_avx_{false};
   bool has_avx2_{false};
@@ -104,6 +147,7 @@ class CPUIDInfo {
   bool has_sse3_{false};
   bool has_sse4_1_{false};
   bool is_hybrid_{false};
+  bool has_tpause_{false};
 
   std::vector<uint32_t> core_uarchs_;  // micro-arch of each core
 
@@ -117,24 +161,10 @@ class CPUIDInfo {
   bool has_arm_neon_i8mm_{false};
   bool has_arm_sve_i8mm_{false};
   bool has_arm_neon_bf16_{false};
+  bool has_arm_sme_{false};
 
-#ifdef CPUIDINFO_ARCH_X86
-
-  void X86Init();
-#elif defined(CPUIDINFO_ARCH_ARM)
-  // Now the following var is only used in ARM build, but later one we may expand the usage.
-  [[maybe_unused]] bool pytorch_cpuinfo_init_{false};
-#endif
-
-#ifdef __linux__
-
-  void ArmLinuxInit();
-
-#elif defined(_WIN32)
-
-  void ArmWindowsInit();
-
-#endif /* (arm or arm64) and windows */
+  std::string vendor_;
+  uint32_t vendor_id_;
 };
 
 }  // namespace onnxruntime

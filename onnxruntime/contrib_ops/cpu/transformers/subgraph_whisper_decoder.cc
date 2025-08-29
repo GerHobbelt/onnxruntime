@@ -6,10 +6,10 @@
 #include "core/framework/tensorprotoutils.h"
 #include "core/framework/utils.h"
 #include "core/providers/cpu/tensor/utils.h"
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 #include "contrib_ops/cpu/transformers/subgraph_t5_decoder.h"
 #include "contrib_ops/cpu/transformers/subgraph_whisper_decoder.h"
-#include "contrib_ops/cpu/transformers/dump_tensor.h"
+#include "contrib_ops/cpu/utils/dump_tensor.h"
 #include "contrib_ops/cpu/transformers/generation_device_helper.h"
 #include "contrib_ops/cpu/transformers/sequences.h"
 
@@ -167,7 +167,7 @@ Status WhisperDecoderSubgraph::CreateInitialFeeds(
   Tensor::InitOrtValue(DataTypeImpl::GetType<int32_t>(), input_ids_shape, allocator, input_ids);
   int32_t* input_ids_data = input_ids.GetMutable<Tensor>()->MutableData<int32_t>();
 
-  AllocatorPtr buffer_allocator = std::make_shared<onnxruntime::CPUAllocator>();
+  AllocatorPtr buffer_allocator = CPUAllocator::DefaultInstance();
   size_t total_size = static_cast<size_t>(static_cast<long long>(cur_len) * batch_beam_size * sizeof(int));
   auto seq_copy = IAllocator::MakeUniquePtr<int>(buffer_allocator, total_size, false, stream);
   int* seq_copy_ptr = seq_copy.get();

@@ -139,8 +139,9 @@ Status FusedConvFp16::PrePack(const Tensor& tensor, int input_idx, AllocatorPtr 
 
   bool share_prepacked_weights = (prepacked_weights != nullptr);
 
+  const bool is_depthwise_conv = (group_input_channels == 1 && group_output_channels == 1);
   // Don't pack the filter buffer if the MlasConvDepthwise path is used.
-  if (!(group_input_channels == 1 && group_output_channels == 1)) {
+  if (!is_depthwise_conv) {
     packed_W_size_ = MlasHalfGemmPackBSize(group_output_channels, kernel_dim, false);
     if (packed_W_size_ != 0) {
       size_t packed_W_data_size = SafeInt<size_t>(group_count) * packed_W_size_;
@@ -415,7 +416,8 @@ Status FusedConvFp16::Compute(OpKernelContext* context) const {
           Xdata,
           static_cast<MLFloat16*>(transpose_input_buffer.get()),
           static_cast<size_t>(C),
-          static_cast<size_t>(input_image_size));
+          static_cast<size_t>(input_image_size),
+          thread_pool);
       input_data = static_cast<MLFloat16*>(transpose_input_buffer.get());
       output_data = static_cast<MLFloat16*>(transpose_output_buffer.get());
       add_src = nullptr;
@@ -472,6 +474,7 @@ Status FusedConvFp16::Compute(OpKernelContext* context) const {
         MlasConvDepthwise(
             worker_indirection_buffer,
             reordered_W,
+            Bdata,
             worker_output,
             static_cast<size_t>(M),
             static_cast<size_t>(output_count),
@@ -571,7 +574,8 @@ Status FusedConvFp16::Compute(OpKernelContext* context) const {
           output_data,
           Ydata,
           static_cast<size_t>(output_image_size),
-          static_cast<size_t>(M));
+          static_cast<size_t>(M),
+          thread_pool);
       if (sum_data != nullptr) {
         MLAS_HALF_GEMM_ACTIVATION_PROCESSOR proc(activation_, sum_data);
         proc.Process(Ydata, 0, 0, static_cast<size_t>(M),
@@ -594,9 +598,15 @@ Status FusedConvFp16::Compute(OpKernelContext* context) const {
 // Operator definitions
 //
 
+ONNX_CPU_OPERATOR_VERSIONED_TYPED_KERNEL(
+    Conv,
+    11, 21, MLFloat16,
+    KernelDefBuilder().TypeConstraint("T", DataTypeImpl::GetTensorType<MLFloat16>()),
+    FusedConvFp16);
+
 ONNX_CPU_OPERATOR_TYPED_KERNEL(
     Conv,
-    11,
+    22,
     MLFloat16,
     KernelDefBuilder().TypeConstraint("T", DataTypeImpl::GetTensorType<MLFloat16>()),
     FusedConvFp16);

@@ -7,6 +7,7 @@
 
 // It is safe to include the below header even if SHARED_PROVIDER macro is enabled
 // as it doesn't include any pb headers.
+#include "core/framework/buffer_deleter.h"
 #include "core/framework/prepacked_weights_container.h"
 
 #ifndef SHARED_PROVIDER
@@ -25,7 +26,7 @@
 #include "core/graph/constants.h"
 #include "core/graph/graph_viewer.h"
 #include "core/graph/onnx_protobuf.h"
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 namespace onnxruntime {
 class OpKernelContext;
 }
@@ -94,7 +95,7 @@ class OpKernel {
   }
 
   // Override this function to return a list of attributes the session can safely remove
-  // after it is intialized and saved. This option is useful to reduce memory usage
+  // after it is initialized and saved. This option is useful to reduce memory usage
   // when the kernel does not reuse the operator attributes but copies them.
   // All attributes returned by this method will be removed by method
   // PruneRemovableAttributes of they exists.
@@ -302,6 +303,24 @@ using BuildKernelCreateInfoFn = KernelCreateInfo (*)();
             .Provider(provider)                                                                                                    \
             .Build(),                                                                                                              \
         static_cast<KernelCreatePtrFn>([](FuncManager&, const OpKernelInfo& info, std::unique_ptr<OpKernel>& out) -> Status { out = std::make_unique<__VA_ARGS__>(info); return Status::OK(); })); \
+  }
+
+#define ONNX_OPERATOR_THREE_TYPED_KERNEL_CLASS_NAME(provider, domain, ver, type1, type2, type3, name) \
+  provider##_##name##_##domain##_ver##ver##_##type1##_##type2##_##type3
+
+#define ONNX_OPERATOR_THREE_TYPED_KERNEL_EX(name, domain, ver, type1, type2, type3, provider, builder, ...)                        \
+  class ONNX_OPERATOR_THREE_TYPED_KERNEL_CLASS_NAME(provider, domain, ver, type1, type2, type3, name);                             \
+  template <>                                                                                                                      \
+  KernelCreateInfo                                                                                                                 \
+  BuildKernelCreateInfo<ONNX_OPERATOR_THREE_TYPED_KERNEL_CLASS_NAME(provider, domain, ver, type1, type2, type3, name)>() {         \
+    return KernelCreateInfo(                                                                                                       \
+        builder.SetName(#name)                                                                                                     \
+            .SetDomain(domain)                                                                                                     \
+            .SinceVersion(ver)                                                                                                     \
+            .Provider(provider)                                                                                                    \
+            .Build(),                                                                                                              \
+        static_cast<KernelCreatePtrFn>([](FuncManager&, const OpKernelInfo& info, std::unique_ptr<OpKernel>& out) -> Status {  \
+          out = std::make_unique<__VA_ARGS__>(info); return Status::OK(); })); \
   }
 
 #define ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_CLASS_NAME(provider, domain, startver, endver, type, name) \

@@ -15,6 +15,7 @@
 #include "core/optimizer/initializer.h"
 
 #include "core/optimizer/embed_layer_norm_fusion.h"
+#include "core/optimizer/group_query_attention_fusion.h"
 #include "core/optimizer/layer_norm_fusion.h"
 #include "core/optimizer/skip_layer_norm_fusion.h"
 
@@ -41,7 +42,11 @@ TEST_F(GraphTransformationTests, LayerNormFusionTest) {
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger_));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
 
   std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
@@ -79,7 +84,11 @@ TEST_F(GraphTransformationTests, TwoLayerNormShareSameInput) {
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger_));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
 
   std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
@@ -94,7 +103,11 @@ TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest) {
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger_));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
 
   std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
@@ -115,7 +128,11 @@ TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_2) {
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger_));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
 
   std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
@@ -131,7 +148,11 @@ TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_3) {
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger_));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
 
   std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
@@ -147,7 +168,11 @@ TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_4) {
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger_));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
 
   std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
@@ -169,7 +194,11 @@ TEST_F(GraphTransformationTests, LayerNormWithSubDupFusionTest) {
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger_));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
 
   std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
@@ -290,9 +319,14 @@ TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_5) {
     return Status::OK();
   };
 
-  std::unique_ptr<GraphTransformer> transformer = std::make_unique<LayerNormFusion>();
-  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, {14, 18}, *logger_, std::move(transformer), TransformerLevel::Level1,
-                                        1, pre_graph_checker, post_graph_checker));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  std::unique_ptr<GraphTransformer> transformer_1 = std::make_unique<LayerNormFusion>();
+  std::unique_ptr<GraphTransformer> transformer_2 =
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2);
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 18, *logger_, std::move(transformer_1),
+                                        TransformerLevel::Level1, 1, pre_graph_checker, post_graph_checker));
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 14, *logger_, std::move(transformer_2),
+                                        TransformerLevel::Level2, 1, pre_graph_checker, post_graph_checker));
 }
 
 TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_6) {
@@ -314,9 +348,14 @@ TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_6) {
     return Status::OK();
   };
 
-  std::unique_ptr<GraphTransformer> transformer = std::make_unique<LayerNormFusion>();
-  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, {14, 18}, *logger_, std::move(transformer), TransformerLevel::Level1,
-                                        1, nullptr, post_graph_checker));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  std::unique_ptr<GraphTransformer> transformer_1 = std::make_unique<LayerNormFusion>();
+  std::unique_ptr<GraphTransformer> transformer_2 =
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2);
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 18, *logger_, std::move(transformer_1),
+                                        TransformerLevel::Level1, 1, nullptr, post_graph_checker));
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 14, *logger_, std::move(transformer_2),
+                                        TransformerLevel::Level2, 1, nullptr, post_graph_checker));
 }
 
 TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_7) {
@@ -341,9 +380,14 @@ TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_7) {
     return Status::OK();
   };
 
-  std::unique_ptr<GraphTransformer> transformer = std::make_unique<LayerNormFusion>();
-  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, {14, 18}, *logger_, std::move(transformer), TransformerLevel::Level1,
-                                        1, nullptr, post_graph_checker));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  std::unique_ptr<GraphTransformer> transformer_1 = std::make_unique<LayerNormFusion>();
+  std::unique_ptr<GraphTransformer> transformer_2 =
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2);
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 18, *logger_, std::move(transformer_1),
+                                        TransformerLevel::Level1, 1, nullptr, post_graph_checker));
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 14, *logger_, std::move(transformer_2),
+                                        TransformerLevel::Level2, 1, nullptr, post_graph_checker));
 }
 
 TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_8) {
@@ -365,9 +409,14 @@ TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_8) {
     return Status::OK();
   };
 
-  std::unique_ptr<GraphTransformer> transformer = std::make_unique<LayerNormFusion>();
-  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, {14, 18}, *logger_, std::move(transformer), TransformerLevel::Level1,
-                                        1, nullptr, post_graph_checker));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  std::unique_ptr<GraphTransformer> transformer_1 = std::make_unique<LayerNormFusion>();
+  std::unique_ptr<GraphTransformer> transformer_2 =
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2);
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 18, *logger_, std::move(transformer_1),
+                                        TransformerLevel::Level1, 1, nullptr, post_graph_checker));
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 14, *logger_, std::move(transformer_2),
+                                        TransformerLevel::Level2, 1, nullptr, post_graph_checker));
 }
 
 TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_9) {
@@ -393,9 +442,14 @@ TEST_F(GraphTransformationTests, LayerNormWithCastFusionTest_9) {
     return Status::OK();
   };
 
-  std::unique_ptr<GraphTransformer> transformer = std::make_unique<LayerNormFusion>();
-  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, {14, 18}, *logger_, std::move(transformer), TransformerLevel::Level1,
-                                        1, nullptr, post_graph_checker));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  std::unique_ptr<GraphTransformer> transformer_1 = std::make_unique<LayerNormFusion>();
+  std::unique_ptr<GraphTransformer> transformer_2 =
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2);
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 18, *logger_, std::move(transformer_1),
+                                        TransformerLevel::Level1, 1, nullptr, post_graph_checker));
+  ASSERT_STATUS_OK(TestGraphTransformer(build_test_case, 14, *logger_, std::move(transformer_2),
+                                        TransformerLevel::Level2, 1, nullptr, post_graph_checker));
 }
 
 TEST_F(GraphTransformationTests, SimplifiedLayerNormFusionTest) {
@@ -438,7 +492,11 @@ TEST_F(GraphTransformationTests, LayerNormScaleBiasTest) {
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger_));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
 
   std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
@@ -522,6 +580,23 @@ TEST_F(GraphTransformationTests, SimplifiedLayerNormWithCastsFusionTestCudaEp) {
   }
 }
 
+static void TestGQAFusion(const std::basic_string<ORTCHAR_T>& file_path, int matmulnbits_count, int matmul_count, logging::Logger* logger) {
+  std::shared_ptr<Model> p_model;
+  ASSERT_TRUE(Model::Load(file_path, p_model, nullptr, *logger).IsOK());
+  Graph& graph = p_model->MainGraph();
+
+  onnxruntime::GraphTransformerManager graph_transformation_mgr{3};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<GroupQueryAttentionFusion>(), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger));
+
+  std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
+  ASSERT_TRUE(op_to_count["com.microsoft.RotaryEmbedding"] == 0);
+  ASSERT_TRUE(op_to_count["com.microsoft.MatMulNBits"] == matmulnbits_count);
+  ASSERT_TRUE(op_to_count["MatMul"] == matmul_count);
+  ASSERT_TRUE(op_to_count["com.microsoft.GroupQueryAttention"] == 1);
+}
+
 static void TestSkipLayerNormFusion(const std::basic_string<ORTCHAR_T>& file_path, int add_count, int ln_count,
                                     int skip_ln_count, int cast_count, logging::Logger* logger) {
   std::shared_ptr<Model> p_model;
@@ -529,8 +604,12 @@ static void TestSkipLayerNormFusion(const std::basic_string<ORTCHAR_T>& file_pat
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
   ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<SkipLayerNormFusion>(), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger));
 
   std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
@@ -559,6 +638,12 @@ TEST_F(GraphTransformationTests, SkipLayerNormFusionTest) {
   TestSkipLayerNormFusion(MODEL_FOLDER "fusion/skip_layer_norm_format3_graph_output.onnx", 1, 1, 0, 0, logger_.get());
 }
 
+TEST_F(GraphTransformationTests, GroupQueryAttentionFusionTest) {
+  TestGQAFusion(MODEL_FOLDER "fusion/gqa_fusion_quantized_simple.onnx", 1, 0, logger_.get());
+  TestGQAFusion(MODEL_FOLDER "fusion/gqa_fusion_different_head_sizes.onnx", 0, 1, logger_.get());
+  TestGQAFusion(MODEL_FOLDER "fusion/gqa_fusion_quantized_different_head_sizes.onnx", 1, 0, logger_.get());
+}
+
 TEST_F(GraphTransformationTests, SkipLayerNormFusionWithCastTest) {
   TestSkipLayerNormFusion(MODEL_FOLDER "fusion/skip_layer_norm_format1_with_cast.onnx", 0, 0, 1, 3, logger_.get());
   TestSkipLayerNormFusion(MODEL_FOLDER "fusion/skip_layer_norm_format2_with_cast.onnx", 0, 0, 1, 3, logger_.get());
@@ -579,8 +664,12 @@ static void TestSkipLayerNormFusionInputOutputCheck(const std::basic_string<ORTC
   Graph& graph = p_model->MainGraph();
 
   onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
-  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level2));
+  const InlinedHashSet<std::string_view> no_limit_empty_ep_list = {};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<LayerNormFusion>(), TransformerLevel::Level1));
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(
+      std::make_unique<LayerNormFusion>(no_limit_empty_ep_list, TransformerLevel::Level2), TransformerLevel::Level2));
   ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<SkipLayerNormFusion>(), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *logger));
   ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger));
 
   for (Node& node : graph.Nodes()) {
@@ -793,19 +882,18 @@ static void EmbedLayerNormFusionFormat5(const std::basic_string<ORTCHAR_T>& file
   EXPECT_EQ(op_to_count["com.microsoft.EmbedLayerNormalization"], 1);
 
   // Validate the position embedding input.
+  double expected_value[] = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 8.0, 7.0, 6.0};
   for (const Node& node : graph.Nodes()) {
     if (node.OpType() == "EmbedLayerNormalization") {
       const ONNX_NAMESPACE::TensorProto* tensor_proto = graph_utils::GetConstantInitializer(graph, node.InputDefs()[3]->Name());
       ASSERT_TRUE(tensor_proto != nullptr);
       EXPECT_EQ(tensor_proto->data_type(), ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
 
-      auto initializer = std::make_unique<Initializer>(*tensor_proto, graph.ModelPath());
-      EXPECT_EQ(initializer->size(), 12U);
+      Initializer initializer{graph, *tensor_proto, graph.ModelPath()};
+      EXPECT_EQ(initializer.size(), std::size(expected_value));
 
-      std::vector<double> expected_value = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 8.0, 7.0, 6.0};
-
-      const float* data = initializer->data<float>();
-      for (size_t i = 0; i < expected_value.size(); i++) {
+      const float* data = initializer.data<float>();
+      for (size_t i = 0; i < std::size(expected_value); i++) {
         EXPECT_EQ(data[i], static_cast<float>(expected_value[i]));
       }
     }

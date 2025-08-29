@@ -93,6 +93,12 @@ namespace utils {
     case ONNX_NAMESPACE::TensorProto_DataType_FLOAT8E5M2FNUZ:     \
       function<Float8E5M2FNUZ>(__VA_ARGS__);                      \
       break;                                                      \
+    case ONNX_NAMESPACE::TensorProto_DataType_INT4:               \
+      function<Int4x2>(__VA_ARGS__);                              \
+      break;                                                      \
+    case ONNX_NAMESPACE::TensorProto_DataType_UINT4:              \
+      function<UInt4x2>(__VA_ARGS__);                             \
+      break;                                                      \
     default:                                                      \
       ORT_ENFORCE(false, "Unknown tensor type of ", tensor_type); \
   }
@@ -153,6 +159,12 @@ namespace utils {
     case ONNX_NAMESPACE::TensorProto_DataType_FLOAT8E5M2FNUZ:              \
       retval = function<Float8E5M2FNUZ>(__VA_ARGS__);                      \
       break;                                                               \
+    case ONNX_NAMESPACE::TensorProto_DataType_INT4:                        \
+      retval = function<Int4x2>(__VA_ARGS__);                              \
+      break;                                                               \
+    case ONNX_NAMESPACE::TensorProto_DataType_UINT4:                       \
+      retval = function<UInt4x2>(__VA_ARGS__);                             \
+      break;                                                               \
     default:                                                               \
       ORT_ENFORCE(false, "Unknown tensor type of ", tensor_type);          \
   }
@@ -203,6 +215,12 @@ namespace utils {
     case ONNX_NAMESPACE::TensorProto_DataType_BFLOAT16:           \
       function<BFloat16>(__VA_ARGS__);                            \
       break;                                                      \
+    case ONNX_NAMESPACE::TensorProto_DataType_INT4:               \
+      function<Int4x2>(__VA_ARGS__);                              \
+      break;                                                      \
+    case ONNX_NAMESPACE::TensorProto_DataType_UINT4:              \
+      function<UInt4x2>(__VA_ARGS__);                             \
+      break;                                                      \
     default:                                                      \
       ORT_ENFORCE(false, "Unknown tensor type of ", tensor_type); \
   }
@@ -251,6 +269,12 @@ namespace utils {
     case ONNX_NAMESPACE::TensorProto_DataType_BFLOAT16:                    \
       retval = function<BFloat16>(__VA_ARGS__);                            \
       break;                                                               \
+    case ONNX_NAMESPACE::TensorProto_DataType_INT4:                        \
+      retval = function<Int4x2>(__VA_ARGS__);                              \
+      break;                                                               \
+    case ONNX_NAMESPACE::TensorProto_DataType_UINT4:                       \
+      retval = function<UInt4x2>(__VA_ARGS__);                             \
+      break;                                                               \
     default:                                                               \
       ORT_ENFORCE(false, "Unknown tensor type of ", tensor_type);          \
   }
@@ -295,6 +319,10 @@ class CallableDispatchableHelper {
  public:
   explicit CallableDispatchableHelper(int32_t dt_type) noexcept : dt_type_(dt_type), called_(0) {}
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4702)
+#endif
   // Must return integer to be in a expandable context
   template <class T, class Fn, class... Args>
   int Invoke(Fn&& fn, Args&&... args) {
@@ -304,6 +332,9 @@ class CallableDispatchableHelper {
     }
     return 0;
   }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
   void CheckCalledOnce() const {
     ORT_ENFORCE(called_ == 1, "Unsupported data type: ", dt_type_);
@@ -314,7 +345,7 @@ class CallableDispatchableHelper {
 // Other policies may set the second result argument accordingly.
 template <class Ret>
 struct UnsupportedTypeDefaultPolicy {
-  void operator()(int32_t dt_type, Ret& /*result*/) const {
+  [[noreturn]] void operator()(int32_t dt_type, Ret& /*result*/) const {
     ORT_THROW("Unsupported data type: ", dt_type);
   }
 };

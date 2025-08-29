@@ -9,7 +9,6 @@ import platform
 import re
 import sys
 import unittest
-from typing import Dict
 
 import numpy as np
 import onnx
@@ -28,8 +27,8 @@ class OrtBackendTest(onnx.backend.test.runner.Runner):
     # pylint: disable=too-few-public-methods
     def __init__(
         self,
-        rtol_overrides: Dict[str, float],
-        atol_overrides: Dict[str, float],
+        rtol_overrides: dict[str, float],
+        atol_overrides: dict[str, float],
     ):
         self._rtol_overrides = rtol_overrides
         self._atol_overrides = atol_overrides
@@ -76,7 +75,7 @@ def apply_filters(filters, category):
     opset_version = f"opset{onnx.defs.onnx_opset_version()}"
     validated_filters = []
     for f in filters[category]:
-        if type(f) is list:  # noqa: E721
+        if type(f) is list:
             opset_regex = f[0]
             filter_regex = f[1]
             opset_match = re.match(opset_regex, opset_version)
@@ -151,6 +150,12 @@ def create_backend_test(test_name=None):
 
         if backend.supports_device("MIGRAPHX"):
             current_failing_tests += apply_filters(filters, "current_failing_tests_MIGRAPHX")
+
+        if backend.supports_device("WEBGPU"):
+            current_failing_tests += apply_filters(filters, "current_failing_tests_WEBGPU")
+
+        if backend.supports_device("QNN"):
+            current_failing_tests += apply_filters(filters, "current_failing_tests_QNN")
 
         # Skip these tests for a "pure" DML onnxruntime python wheel. We keep these tests enabled for instances where both DML and CUDA
         # EPs are available (Windows GPU CI pipeline has this config) - these test will pass because CUDA has higher precedence than DML

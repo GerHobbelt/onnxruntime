@@ -1,12 +1,16 @@
 import copy
 import logging
 from collections import OrderedDict
-from typing import Any, Dict, List, Tuple, Union
+from collections.abc import Mapping
+from typing import Any
 
 import numpy
 import torch
 
 from onnxruntime import InferenceSession, RunOptions
+
+# Type alias
+ShapeDict = Mapping[str, tuple | list[int]]
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,7 @@ class TypeHelper:
             "tensor(float)": numpy.float32,
             "tensor(float16)": numpy.float16,
             "tensor(bool)": bool,
+            "tensor(uint8)": numpy.uint8,
         }
         if ort_type not in ort_type_to_numpy_type_map:
             raise ValueError(f"{ort_type} not found in map")
@@ -48,7 +53,9 @@ class TypeHelper:
             "tensor(int32)": torch.int32,
             "tensor(float)": torch.float32,
             "tensor(float16)": torch.float16,
+            "tensor(bfloat16)": torch.bfloat16,
             "tensor(bool)": torch.bool,
+            "tensor(uint8)": torch.uint8,
         }
         if ort_type not in ort_type_to_torch_type_map:
             raise ValueError(f"{ort_type} not found in map")
@@ -64,6 +71,7 @@ class TypeHelper:
             numpy.float32: torch.float32,
             numpy.float16: torch.float16,
             bool: torch.bool,
+            numpy.uint8: torch.uint8,
         }
         if numpy_type not in numpy_type_to_torch_type_map:
             raise ValueError(f"{numpy_type} not found in map")
@@ -78,6 +86,7 @@ class TypeHelper:
             torch.float32: numpy.float32,
             torch.float16: numpy.float16,
             torch.bool: bool,
+            torch.uint8: numpy.uint8,
         }
         if torch_type not in torch_type_to_numpy_type_map:
             raise ValueError(f"{torch_type} not found in map")
@@ -85,7 +94,7 @@ class TypeHelper:
         return torch_type_to_numpy_type_map[torch_type]
 
     @staticmethod
-    def get_io_numpy_type_map(ort_session: InferenceSession) -> Dict[str, numpy.dtype]:
+    def get_io_numpy_type_map(ort_session: InferenceSession) -> dict[str, numpy.dtype]:
         """Create a mapping from input/output name to numpy data type"""
         name_to_numpy_type = {}
         for input in ort_session.get_inputs():
@@ -113,7 +122,7 @@ class IOBindingHelper:
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        past: List[torch.Tensor],
+        past: list[torch.Tensor],
         output_buffers,
         output_shapes,
         name_to_np_type=None,
@@ -224,12 +233,45 @@ class CudaSession:
         self.output_tensors = OrderedDict()
         self.device = device
 
+        # Pairs of input and output names that share the same buffer.
+        self.buffer_sharing: dict[str, str] = {}
+
+    def set_buffer_sharing(self, input_name: str, output_name: str):
+        assert input_name in self.input_names
+        assert output_name in self.output_names
+        self.buffer_sharing[input_name] = output_name
+        self.buffer_sharing[output_name] = input_name
+
     def __del__(self):
         del self.input_tensors
         del self.output_tensors
         del self.io_binding
 
-    def allocate_buffers(self, shape_dict: Dict[str, Union[Tuple[int], List[int]]]):
+    def bind_input_and_buffer_sharing(self, name: str, tensor: torch.Tensor):
+        device_id = tensor.device.index if tensor.device.index is not None else 0
+        tensor_shape = [1] if len(tensor.shape) == 0 else list(tensor.shape)
+
+        self.io_binding.bind_input(
+            name,
+            tensor.device.type,
+            device_id,
+            self.io_name_to_numpy_type[name],
+            tensor_shape,
+            tensor.data_ptr(),
+        )
+
+        if name in self.buffer_sharing:
+            self.io_binding.bind_output(
+                self.buffer_sharing[name],
+                tensor.device.type,
+                device_id,
+                self.io_name_to_numpy_type[name],
+                tensor_shape,
+                tensor.data_ptr(),
+            )
+            self.output_tensors[self.buffer_sharing[name]] = tensor
+
+    def allocate_buffers(self, shape_dict: ShapeDict):
         """Allocate tensors for I/O Binding"""
         if self.enable_cuda_graph:
             for name, shape in shape_dict.items():
@@ -245,20 +287,15 @@ class CudaSession:
                         device=self.device
                     )
                     self.input_tensors[name] = tensor
-
-                    self.io_binding.bind_input(
-                        name,
-                        tensor.device.type,
-                        tensor.device.index,
-                        numpy_dtype,
-                        list(tensor.size()),
-                        tensor.data_ptr(),
-                    )
+                    self.bind_input_and_buffer_sharing(name, tensor)
 
         for name, shape in shape_dict.items():
             if name in self.output_names:
                 # Reuse allocated buffer when the shape is same
                 if name in self.output_tensors and tuple(self.output_tensors[name].shape) == tuple(shape):
+                    continue
+
+                if name in self.buffer_sharing:
                     continue
 
                 numpy_dtype = self.io_name_to_numpy_type[name]
@@ -270,13 +307,13 @@ class CudaSession:
                 self.io_binding.bind_output(
                     name,
                     tensor.device.type,
-                    tensor.device.index,
+                    tensor.device.index if tensor.device.index is not None else 0,
                     numpy_dtype,
                     list(tensor.size()),
                     tensor.data_ptr(),
                 )
 
-    def infer(self, feed_dict: Dict[str, torch.Tensor], run_options: RunOptions = None, synchronize: bool = False):
+    def infer(self, feed_dict: dict[str, torch.Tensor], run_options: RunOptions = None, synchronize: bool = True):
         """Bind input tensors and run inference"""
         for name, tensor in feed_dict.items():
             assert isinstance(tensor, torch.Tensor) and tensor.is_contiguous()
@@ -287,16 +324,8 @@ class CudaSession:
                     assert tensor.device.type == "cuda"
                     self.input_tensors[name].copy_(tensor)
                 else:
-                    self.io_binding.bind_input(
-                        name,
-                        tensor.device.type,
-                        tensor.device.index,
-                        TypeHelper.torch_type_to_numpy_type(tensor.dtype),
-                        [1] if len(tensor.shape) == 0 else list(tensor.shape),
-                        tensor.data_ptr(),
-                    )
+                    self.bind_input_and_buffer_sharing(name, tensor)
 
-        # Synchronization are not needed in most cases unless different streams are used or inputs/outputs are in CPU.
         if synchronize:
             self.io_binding.synchronize_inputs()
             self.ort_session.run_with_iobinding(self.io_binding, run_options)
@@ -307,7 +336,7 @@ class CudaSession:
         return self.output_tensors
 
     @staticmethod
-    def get_cuda_provider_options(device_id: int, enable_cuda_graph: bool, stream: int = 0) -> Dict[str, Any]:
+    def get_cuda_provider_options(device_id: int, enable_cuda_graph: bool, stream: int = 0) -> dict[str, Any]:
         options = {
             "device_id": device_id,
             "arena_extend_strategy": "kSameAsRequested",
@@ -326,12 +355,17 @@ class GpuBinding(CudaSession):
         self,
         ort_session: InferenceSession,
         device: torch.device,
-        shape_dict: Dict[str, Union[Tuple[int], List[int]]],
+        shape_dict: ShapeDict,
         enable_gpu_graph: bool = False,
         gpu_graph_id: int = -1,
         stream: int = 0,
+        buffer_sharing: dict[str, str] | None = None,
     ):
         super().__init__(ort_session, device, enable_gpu_graph)
+        if buffer_sharing:
+            for input_name, output_name in buffer_sharing.items():
+                self.set_buffer_sharing(input_name, output_name)
+
         self.allocate_buffers(shape_dict)
         self.gpu_graph_id = gpu_graph_id
         # For cuda graph, we need to keep a copy of shape_dict to check if the shape is same in inference later.
@@ -351,7 +385,7 @@ class GpuBinding(CudaSession):
 
         return options
 
-    def infer(self, feed_dict: Dict[str, torch.Tensor], disable_cuda_graph_in_run: bool = False):
+    def infer(self, feed_dict: dict[str, torch.Tensor], disable_cuda_graph_in_run: bool = False):
         run_options = self.get_run_options(disable_cuda_graph_in_run)
 
         if self.stream:
@@ -381,8 +415,9 @@ class GpuBindingManager:
 
     def get_binding(
         self,
-        shape_dict: Dict[str, Union[Tuple[int], List[int]]],
+        shape_dict: ShapeDict,
         use_cuda_graph: bool = False,
+        buffer_sharing: dict[str, str] | None = None,
     ) -> GpuBinding:
         for gpu_graph_binding in self.graph_bindings:
             # Found a cuda graph that captured with the same shape
@@ -392,7 +427,9 @@ class GpuBindingManager:
         # Reached the maximum number of cuda graphs. Return a binding without cuda graph.
         if len(self.graph_bindings) >= self.max_cuda_graphs or (not use_cuda_graph):
             if self.no_graph_binding is None:
-                self.no_graph_binding = GpuBinding(self.ort_session, self.device, shape_dict, stream=self.stream)
+                self.no_graph_binding = GpuBinding(
+                    self.ort_session, self.device, shape_dict, stream=self.stream, buffer_sharing=buffer_sharing
+                )
             else:
                 self.no_graph_binding.allocate_buffers(shape_dict)
             return self.no_graph_binding
@@ -405,6 +442,7 @@ class GpuBindingManager:
             enable_gpu_graph=True,
             gpu_graph_id=len(self.graph_bindings),
             stream=self.stream,
+            buffer_sharing=buffer_sharing,
         )
         self.graph_bindings.append(gpu_graph_binding)
         return gpu_graph_binding

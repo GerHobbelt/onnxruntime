@@ -19,24 +19,12 @@ namespace {
 
 #if !defined(ORT_MINIMAL_BUILD)
 namespace selectors {
+
 const Node* GetLoneConsumerNode(const GraphViewer& graph_viewer, const Node& node) {
   if (!optimizer_utils::CheckOutputEdges(graph_viewer.GetGraph(), node, 1)) {
     return nullptr;
   }
-  const Node* next_node = &*node.OutputNodesBegin();
-  // ensure that the target node also has only one input that is not an initializer
-  const size_t input_edges_total = next_node->GetInputEdgesCount();
-  int non_const_edges = 0;
-  for (size_t edge_idx = 0; edge_idx < input_edges_total; ++edge_idx) {
-    if (!graph_utils::NodeArgIsConstant(graph_viewer.GetGraph(), *next_node->InputDefs()[edge_idx])) {
-      ++non_const_edges;
-    }
-  }
-  if (non_const_edges > 1) {
-    return nullptr;
-  } else {
-    return next_node;
-  }
+  return &*node.OutputNodesBegin();
 }
 
 bool HasElementDataType(const NodeArg& node_arg, int32_t data_type) {
@@ -58,16 +46,11 @@ bool HasElementDataType(const NodeArg& node_arg, int32_t data_type) {
 }
 
 bool ConvFusionDataTypeCheck(const Node& conv_node) {
-  // TODO(hasesh): The CPU and CUDA EP only support float type for the Conv+Activation
+  // TODO(hasesh): The CPU EP only supports float type for the Conv+Activation
   // and the Conv+Add+Relu fusions.
   // Assess the support level for the other compatible EPs and if they also
   // only support float, remove the EP check altogether.
   const std::string_view node_ep = conv_node.GetExecutionProviderType();
-  if (node_ep == kCudaExecutionProvider) {
-    if (!HasElementDataType(*conv_node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT)) {
-      return false;
-    }
-  }
   if (node_ep == kCpuExecutionProvider) {
 #ifdef MLAS_F16VEC_INTRINSICS_SUPPORTED
     if (!HasElementDataType(*conv_node.InputDefs()[0], ONNX_NAMESPACE::TensorProto_DataType_FLOAT) &&
@@ -120,11 +103,13 @@ class ConvActivationSelector : public NodeSelector {
     }
 
     // check EP type and activation
-    if (node_ep == kCudaExecutionProvider || node_ep == kRocmExecutionProvider) {
+    if (node_ep == kCudaExecutionProvider) {
+      return std::nullopt;
+    } else if (node_ep == kRocmExecutionProvider) {
       if (!graph_utils::IsSupportedOptypeVersionAndDomain(*next_node, "Relu", {6, 13, 14})) {
         return std::nullopt;
       }
-    } else if (node_ep.empty() || node_ep == kCpuExecutionProvider || node_ep == kJsExecutionProvider) {
+    } else if (node_ep.empty() || node_ep == kCpuExecutionProvider || node_ep == kJsExecutionProvider || node_ep == kWebGpuExecutionProvider) {
       if (!is_supported_non_cuda_rocm_ep_activation(*next_node) &&
           !graph_utils::IsSupportedOptypeVersionAndDomain(*next_node, "HardSigmoid", {6})) {
         return std::nullopt;
@@ -142,47 +127,11 @@ class ConvActivationSelector : public NodeSelector {
   }
 };
 
-class ConvAddRelu : public NodeSelector {
- public:
-  ConvAddRelu() = default;
-
-  std::optional<NodesToOptimizeIndices> Select(const GraphViewer& graph_viewer, const Node& node) const override {
-    const std::string_view node_ep = node.GetExecutionProviderType();
-    // only for CUDA EP
-    if (node_ep != kCudaExecutionProvider) {
-      return std::nullopt;
-    }
-
-    if (!ConvFusionDataTypeCheck(node)) {
-      return std::nullopt;
-    }
-
-    const auto* add_node = GetLoneConsumerNode(graph_viewer, node);
-    if (!add_node ||
-        !graph_utils::IsSupportedOptypeVersionAndDomain(*add_node, "Add", {6, 7, 13, 14}) ||
-        add_node->GetExecutionProviderType() != node_ep) {
-      return std::nullopt;
-    }
-
-    const auto* relu_node = GetLoneConsumerNode(graph_viewer, *add_node);
-    if (!relu_node ||
-        !graph_utils::IsSupportedOptypeVersionAndDomain(*relu_node, "Relu", {6, 13, 14}) ||
-        relu_node->GetExecutionProviderType() != node_ep) {
-      return std::nullopt;
-    }
-
-    NodesToOptimizeIndicesBuilder builder{};
-    builder.target_node = node.Index();
-    builder.output_nodes = {add_node->Index(),
-                            relu_node->Index()};
-    return builder.Build();
-  }
-};
-
 }  // namespace selectors
 #endif  // !defined(ORT_MINIMAL_BUILD)
 
 namespace actions {
+
 using NTO = NodesToOptimize;
 
 class FuseConvActivationAction : public ReplaceWithNew {
@@ -257,36 +206,6 @@ class FuseConvActivationAction : public ReplaceWithNew {
   }
 };
 
-class FuseConvAddRelu : public ReplaceWithNew {
- private:
-  std::string OpType(const RuntimeState&) const override { return "FusedConv"; }
-
-  std::string Domain(const RuntimeState&) const override { return kMSDomain; }
-
-  NodeAttributes ExtraAttributes(const RuntimeState&) const override {
-    NodeAttributes extra_fused_conv_attributes;
-    utils::SetNodeAttribute(utils::MakeAttribute("activation", "Relu"), extra_fused_conv_attributes);
-    return extra_fused_conv_attributes;
-  }
-
-  std::vector<NodeAndMoveInfo> ValueMoves(const RuntimeState& state) const override {
-    const auto& conv = state.selected_nodes.Target();
-
-    ORT_ENFORCE(conv.GetOutputEdgesCount() == 1 && conv.OutputNodesBegin()->OpType() == "Add",
-                "Expected Conv then Add.");
-    const auto add_input_idx = 1 - conv.OutputEdgesBegin()->GetDstArgIndex();
-
-    const auto conv_location = NTO::NodeLocation{NTO::NodeType::kTarget, 0};
-    const auto add_location = NTO::NodeLocation{NTO::NodeType::kOutput, 0};
-    const auto relu_location = NTO::NodeLocation{NTO::NodeType::kOutput, 1};
-
-    return {
-        MoveAll(conv_location, ArgType::kInput),                                       // move all inputs from conv
-        MoveAndAppend(add_location, ArgType::kInput, add_input_idx, ArgType::kInput),  // append add input
-        MoveAll(relu_location, ArgType::kOutput),                                      // move all outputs from relu
-    };
-  }
-};
 }  // namespace actions
 
 void RegisterConvActivationFusionRules(SelectorActionRegistry& registry) {
@@ -297,19 +216,7 @@ void RegisterConvActivationFusionRules(SelectorActionRegistry& registry) {
   const std::string msDomainConv = SelectorActionRegistry::OpVersionsMapKey("NhwcConv", kMSDomain);
   auto selector = std::make_unique<selectors::ConvActivationSelector>();
 
-  registry.RegisterSelectorAndAction(name, {{"Conv", {1, 11}}, {msInternalNHWCDomainConv, {11}}, {msDomainConv, {1}}},
-                                     std::move(selector), std::move(action));
-#else
-  registry.RegisterAction(name, std::move(action));
-#endif
-}
-
-void RegisterConvAddReluFusionRules(SelectorActionRegistry& registry) {
-  const auto name = "ConvAddRelu";
-  auto action = std::make_unique<actions::FuseConvAddRelu>();
-#if !defined(ORT_MINIMAL_BUILD)
-  auto selector = std::make_unique<selectors::ConvAddRelu>();
-  registry.RegisterSelectorAndAction(name, {{"Conv", {1, 11}}},
+  registry.RegisterSelectorAndAction(name, {{"Conv", {1, 11}}, {msInternalNHWCDomainConv, {1, 11}}, {msDomainConv, {1}}},
                                      std::move(selector), std::move(action));
 #else
   registry.RegisterAction(name, std::move(action));
@@ -319,7 +226,6 @@ void RegisterConvAddReluFusionRules(SelectorActionRegistry& registry) {
 SelectorActionRegistry CreateSelectorActionRegistry() {
   SelectorActionRegistry registry{};
   RegisterConvActivationFusionRules(registry);
-  RegisterConvAddReluFusionRules(registry);
   return registry;
 }
 

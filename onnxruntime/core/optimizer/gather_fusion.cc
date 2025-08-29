@@ -27,7 +27,7 @@ static bool GetScalarInt64Initializer(const Graph& graph, const NodeArg& node_ar
   if (!optimizer_utils::IsScalar(node_arg)) return false;
   const ONNX_NAMESPACE::TensorProto* tensor_proto = graph_utils::GetConstantInitializer(graph, node_arg.Name());
   if (!tensor_proto || tensor_proto->data_type() != ONNX_NAMESPACE::TensorProto::INT64) return false;
-  Initializer init_const{*tensor_proto, graph.ModelPath()};
+  Initializer init_const{graph, *tensor_proto, graph.ModelPath()};
   value = *(init_const.data<int64_t>());
   rank = tensor_proto->dims_size();
   return true;
@@ -268,12 +268,13 @@ Status GatherSliceToSplitFusion::ApplyImpl(Graph& graph, bool& modified, int gra
     }
 
     ONNX_NAMESPACE::TensorProto split_initializer_proto;
-    split_initializer_proto.set_name(graph.GenerateNodeName("splits"));
+    split_initializer_proto.set_name(graph.GenerateNodeArgName("splits"));
     split_initializer_proto.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_INT64);
     split_initializer_proto.add_dims(static_cast<int64_t>(split_values.size()));
     split_initializer_proto.mutable_int64_data()->Add(split_values.begin(), split_values.end());
     NodeArg* split_initializer_arg = &graph_utils::AddInitializer(graph, split_initializer_proto);
-    Node& split_node = graph.AddNode(nodes_to_fuse[0].get().Name() + "/GatherSliceToSplitFusion/", "Split", "Split for Fused Gather nodes",
+    const auto split_node_name = graph.GenerateNodeName(nodes_to_fuse[0].get().Name() + "/GatherSliceToSplitFusion");
+    Node& split_node = graph.AddNode(split_node_name, "Split", "Split for Fused Gather nodes",
                                      {graph.GetNodeArg(node_arg->Name()), split_initializer_arg}, split_outputs);
     split_node.AddAttribute("axis", axis);
     split_node.SetExecutionProviderType(nodes_to_fuse[0].get().GetExecutionProviderType());

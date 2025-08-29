@@ -388,7 +388,7 @@ TEST_F(GraphTest, UnusedValueInfoSerializes) {
   std::shared_ptr<Model> model;
   ASSERT_STATUS_OK(Model::Load(std::move(m), model, nullptr, *logger_));
   model->MainGraph().SetGraphProtoSyncNeeded();
-  EXPECT_TRUE(Model::Save(*model, "graph_with_unused_value_info.onnx").IsOK());
+  EXPECT_TRUE(Model::Save(*model, ORT_TSTR("graph_with_unused_value_info.onnx")).IsOK());
 }
 
 TEST_F(GraphTest, WrongOpset) {
@@ -464,7 +464,7 @@ TEST_F(GraphTest, LocalCustomRegistry) {
 
 // Tests the case where function op and function body ops belong to different domains.
 // Tests that such a model can be loaded successfully, function body initialization is
-// successful and domain and verison mapping for each node is successful (by verifying
+// successful and domain and version mapping for each node is successful (by verifying
 // op schema for each of the function body nodes can be found).
 TEST_F(GraphTest, FunctionOpsetImportTest) {
   std::shared_ptr<Model> model;
@@ -481,7 +481,7 @@ TEST_F(GraphTest, FunctionOpsetImportTest) {
       // phase .i.e. Init function body only if none of EPs have a kernel matching the function op
       // then this check will not hold true and should be removed.
 
-      // We delay the funciton instantiate untill partition the graph
+      // We delay the function instantiate until partition the graph
       // this check is no longer valid anymore.
       /*ASSERT_TRUE(!schema->HasFunction() && !schema->HasContextDependentFunction());*/
       continue;
@@ -762,7 +762,7 @@ TEST_F(GraphTest, GraphConstruction_CheckIsAcyclic) {
   auto status = graph.Resolve();
   EXPECT_TRUE(status.IsOK()) << status.ErrorMessage();
 
-  EXPECT_TRUE(Model::Save(model, "graph_1.onnx").IsOK());
+  EXPECT_TRUE(Model::Save(model, ORT_TSTR("graph_1.onnx")).IsOK());
   std::shared_ptr<Model> model2;
   EXPECT_TRUE(Model::Load(ORT_TSTR("graph_1.onnx"), model2, nullptr, *logger_).IsOK());
 
@@ -1476,7 +1476,7 @@ TEST_F(GraphTest, GraphConstruction_TypeInference) {
   EXPECT_EQ("node_4_out_1", graph.GetOutputs()[0]->Name());
   EXPECT_EQ(2u, graph.GetInputs().size());
 
-  EXPECT_TRUE(Model::Save(model, "model_x.onnx").IsOK());
+  EXPECT_TRUE(Model::Save(model, ORT_TSTR("model_x.onnx")).IsOK());
   std::shared_ptr<Model> loaded_model;
   EXPECT_TRUE(Model::Load(ORT_TSTR("model_x.onnx"), loaded_model, nullptr, *logger_).IsOK());
   EXPECT_EQ(2u, loaded_model->MainGraph().GetInputs().size());
@@ -1698,7 +1698,7 @@ TEST_F(GraphTest, ReplaceInitializedTensor) {
     ONNX_NAMESPACE::TensorProto bad_name = original;
     bad_name.set_name("invalid");
 
-    status = graph.ReplaceInitializedTensor(std::move(bad_name));
+    status = graph.ReplaceInitializedTensor(bad_name, OrtValue());
     ASSERT_FALSE(status.IsOK());
   }
 
@@ -1706,7 +1706,7 @@ TEST_F(GraphTest, ReplaceInitializedTensor) {
     ONNX_NAMESPACE::TensorProto bad_type = original;
     bad_type.set_data_type(TensorProto_DataType_FLOAT16);
 
-    status = graph.ReplaceInitializedTensor(std::move(bad_type));
+    status = graph.ReplaceInitializedTensor(bad_type, OrtValue());
     ASSERT_FALSE(status.IsOK());
   }
 
@@ -1716,7 +1716,7 @@ TEST_F(GraphTest, ReplaceInitializedTensor) {
     bad_dims.add_dims(2);
     bad_dims.add_dims(1);
 
-    status = graph.ReplaceInitializedTensor(std::move(bad_dims));
+    status = graph.ReplaceInitializedTensor(bad_dims, OrtValue());
     ASSERT_FALSE(status.IsOK());
   }
 
@@ -1726,26 +1726,39 @@ TEST_F(GraphTest, ReplaceInitializedTensor) {
     valid_replacement.add_int32_data(3);
     valid_replacement.add_int32_data(4);
 
-    status = graph.ReplaceInitializedTensor(valid_replacement);
+    status = graph.ReplaceInitializedTensor(valid_replacement, OrtValue());
     ASSERT_TRUE(status.IsOK()) << status.ErrorMessage();
 
-    auto tensor_data_matches = [](const ONNX_NAMESPACE::TensorProto& a, const ONNX_NAMESPACE::TensorProto& b) {
-      if (a.int32_data_size() != b.int32_data_size()) return false;
-      for (int i = 0; i < a.int32_data_size(); ++i) {
-        if (a.int32_data(i) != b.int32_data(i)) return false;
+    auto tensor_data_matches = [](const Graph& graph, const ONNX_NAMESPACE::TensorProto& a,
+                                  const ONNX_NAMESPACE::TensorProto& b) -> bool {
+      // For simplicity. We do not want to deal with external and raw data combinations.
+      Tensor tensor_a;
+      EXPECT_TRUE(utils::CreateTensorFromTensorProto(Env::Default(), graph.ModelPath(), a, tensor_a).IsOK());
+      Tensor tensor_b;
+      EXPECT_TRUE(utils::CreateTensorFromTensorProto(Env::Default(), graph.ModelPath(), b, tensor_b).IsOK());
+
+      EXPECT_EQ(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, tensor_a.GetElementType());
+
+      if (tensor_a.GetElementType() != tensor_b.GetElementType()) {
+        return false;
       }
-      return true;
+      if (tensor_a.Shape() != tensor_b.Shape()) {
+        return false;
+      }
+      const auto span_a = tensor_a.DataAsSpan<int32_t>();
+      const auto span_b = tensor_b.DataAsSpan<int32_t>();
+      return std::equal(span_a.begin(), span_a.end(), span_b.begin());
     };
 
     // check retrieved tensor
     const ONNX_NAMESPACE::TensorProto* result;
     ASSERT_TRUE(graph.GetInitializedTensor(initializer_name, result));
-    ASSERT_TRUE(tensor_data_matches(*result, valid_replacement));
+    ASSERT_TRUE(tensor_data_matches(graph, *result, valid_replacement));
 
     // check GraphProto content
     const ONNX_NAMESPACE::GraphProto graph_proto = graph.ToGraphProto();
     ASSERT_EQ(graph_proto.initializer_size(), 1);
-    ASSERT_TRUE(tensor_data_matches(graph_proto.initializer(0), valid_replacement));
+    ASSERT_TRUE(tensor_data_matches(graph, graph_proto.initializer(0), valid_replacement));
   }
 }
 
@@ -1782,8 +1795,8 @@ TEST_F(GraphTest, InjectExternalInitializedTensors) {
       {initializer_name, ort_value}};
 
   // We do not need actual files there since we are not going to load it.
-  const auto tensor_data_dir_path = Path::Parse(ToPathString("."));
-  const auto tensor_data_dir_relative_path = Path::Parse(ToPathString("external_data.bin"));
+  const auto tensor_data_dir_path = ORT_TSTR(".");
+  const auto tensor_data_dir_relative_path = ORT_TSTR("external_data.bin");
 
   const auto tensor_proto =
       [&]() {
@@ -1792,7 +1805,7 @@ TEST_F(GraphTest, InjectExternalInitializedTensors) {
         tensor_proto.add_dims(tensor_data.size());
         tensor_proto.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_INT32);
         tensor_proto.set_data_location(ONNX_NAMESPACE::TensorProto_DataLocation_EXTERNAL);
-        SetTensorProtoExternalData("location", ToUTF8String(tensor_data_dir_relative_path.ToPathString()),
+        SetTensorProtoExternalData("location", ToUTF8String(tensor_data_dir_relative_path),
                                    tensor_proto);
         SetTensorProtoExternalData("offset", "0", tensor_proto);
         SetTensorProtoExternalData("length", std::to_string(tensor_data.size() * sizeof(int32_t)), tensor_proto);
@@ -1822,13 +1835,13 @@ TEST_F(GraphTest, InjectExternalInitializedTensors) {
 
   const TensorProto* with_data = nullptr;
   ASSERT_TRUE(graph.GetInitializedTensor(initializer_name, with_data));
-  // No longer has external data
   if (with_data) {
-    ASSERT_FALSE(utils::HasExternalData(*with_data));
+    // This proto still has external data, but now it points to the OrtValue.
+    ASSERT_TRUE(utils::HasExternalData(*with_data));
     const auto& original_tensor = ort_value.Get<Tensor>();
-    Tensor replaced_tensor(original_tensor.DataType(), data_shape, std::make_shared<CPUAllocator>());
-    ASSERT_STATUS_OK(utils::TensorProtoToTensor(Env::Default(), tensor_data_dir_path.ToPathString().c_str(), *with_data,
-                                                replaced_tensor));
+    Tensor replaced_tensor;
+    ASSERT_STATUS_OK(utils::CreateTensorFromTensorProto(Env::Default(), tensor_data_dir_path, *with_data,
+                                                        replaced_tensor));
     ASSERT_EQ(original_tensor.GetElementType(), replaced_tensor.GetElementType());
     const auto original_span = original_tensor.DataAsSpan<int32_t>();
     const auto replaced_span = replaced_tensor.DataAsSpan<int32_t>();
@@ -1881,14 +1894,21 @@ TEST_F(GraphTest, AddRemoveInitializerHandling) {
   ASSERT_EQ(graph_proto_from_graph.initializer_size(), 2);
 
   auto validate_proto = [&](const GraphProto& proto) {
+    // Due to changes in a way we generate ToGraphProto() const, we can not guarantee the order of initializers
+    // in the generated GraphProto.
     auto initializers = proto.initializer();
-    // we expect '2' to be before '1' due to the remove moving the last initializer into the slot of the one being
-    // removed in order to free memory and only move one entry
-    EXPECT_EQ(initializers[0].name(), init2.name());
-    EXPECT_EQ(initializers[0].int32_data()[0], 2);
+    auto hit = std::find_if(initializers.begin(), initializers.end(),
+                            [&init](const ONNX_NAMESPACE::TensorProto& t) { return t.name() == init.name(); });
+    EXPECT_NE(hit, initializers.end())
+        << "Initializer with name '" << init.name() << "' not found in the proto.";
+    EXPECT_EQ(hit->int32_data()[0], 1);
 
-    EXPECT_EQ(initializers[1].name(), init.name());
-    EXPECT_EQ(initializers[1].int32_data()[0], 1);
+    hit = std::find_if(initializers.begin(), initializers.end(),
+                       [&init2](const ONNX_NAMESPACE::TensorProto& t) { return t.name() == init2.name(); });
+    EXPECT_NE(hit, initializers.end())
+        << "Initializer with name '" << init2.name() << "' not found in the proto.";
+
+    EXPECT_EQ(hit->int32_data()[0], 2);
   };
 
   validate_proto(graph_proto_from_const_graph);
@@ -2124,6 +2144,187 @@ TEST_F(GraphTest, SubgraphOutputIsOuterScopeValue) {
               ::testing::ContainsRegex("Subgraph output \\(.*\\) is an outer scope value being returned directly."));
 }
 
+static void CreateIntializerWithDataInMemory(const std::string& name, const AllocatorPtr& allocator, int64_t size,
+                                             TensorProto& tensor_proto, OrtValue& ort_value) {
+  TensorShape shape({size});
+  Tensor::InitOrtValue(DataTypeImpl::GetType<float>(), shape, allocator, ort_value);
+  float v = 0;
+  auto* data = ort_value.GetMutable<Tensor>()->MutableData<float>();
+  for (int64_t i = 0; i < size; ++i) {
+    *data++ = v++;
+  }
+
+  tensor_proto = utils::TensorToTensorProto(ort_value.Get<Tensor>(), name, true);
+}
+
+TEST(GraphGetOrtValueInitializerTest, ReturnsOrtValueForExistingInitializer) {
+  Model model("TestModel", false, ModelMetaData(), PathString(), IOnnxRuntimeOpSchemaRegistryList(), {}, {},
+              DefaultLoggingManager().DefaultLogger());
+  Graph& graph = model.MainGraph();
+
+  // Create a simple TensorProto initializer
+  const std::string name = "init1";
+  auto allocator = CPUAllocator::DefaultInstance();
+  constexpr const int64_t kTensorSize = 256;
+  TensorProto tensor_proto;
+  OrtValue ort_value;
+  CreateIntializerWithDataInMemory(name, allocator, kTensorSize, tensor_proto, ort_value);
+
+  ASSERT_STATUS_OK(graph.AddInitializedOrtValue(tensor_proto, ort_value));
+
+  // Test retrieval
+  OrtValue retrieved;
+  EXPECT_TRUE(graph.GetOrtValueInitializer(name, retrieved, false));
+  const Tensor& t = retrieved.Get<Tensor>();
+  EXPECT_EQ(t.Shape().Size(), kTensorSize);
+}
+
+TEST(GraphGetOrtValueInitializerTest, ReturnsFalseForNonExistentInitializer) {
+  Model model("TestModel", false, ModelMetaData(), PathString(), IOnnxRuntimeOpSchemaRegistryList(), {}, {},
+              DefaultLoggingManager().DefaultLogger());
+  Graph& graph = model.MainGraph();
+
+  OrtValue retrieved;
+  EXPECT_FALSE(graph.GetOrtValueInitializer("does_not_exist", retrieved, false));
+}
+
+namespace {
+// Casing only, do not add members
+class NodeWrapper : public Node {
+ public:
+  Node::Definitions& MutableDefinitions() {
+    return Node::MutableDefinitions();
+  }
+};
+}  // namespace
+
+TEST(GraphGetOrtValueInitializerTest, ReturnsOrtValueFromOuterScope) {
+  // Create parent graph with initializer
+  Model parent_model("ParentModel", false, ModelMetaData(), PathString(), IOnnxRuntimeOpSchemaRegistryList(), {}, {},
+                     DefaultLoggingManager().DefaultLogger());
+  Graph& parent_graph = parent_model.MainGraph();
+
+  const std::string outer_init_name = "outer_init";
+  auto allocator = CPUAllocator::DefaultInstance();
+  constexpr const int64_t kTensorSize = 256;
+  TensorProto tensor_proto;
+  OrtValue ort_value;
+  CreateIntializerWithDataInMemory(outer_init_name, allocator, kTensorSize, tensor_proto, ort_value);
+
+  ASSERT_STATUS_OK(parent_graph.AddInitializedOrtValue(tensor_proto, ort_value));
+
+  // Create a node in parent graph that will be the parent node for the subgraph
+  TypeProto tensor_type;
+  tensor_type.mutable_tensor_type()->set_elem_type(TensorProto_DataType_FLOAT);
+  auto& input_arg = parent_graph.GetOrCreateNodeArg("node_input", &tensor_type);
+  auto& output_arg = parent_graph.GetOrCreateNodeArg("node_output", &tensor_type);
+  NodeArg* inputs[] = {&input_arg};
+  NodeArg* outputs[] = {&output_arg};
+
+  // Create parent node with a subgraph attribute
+  auto& parent_node = parent_graph.AddNode("parent_node", "If", "parent node with subgraph", inputs, outputs);
+  // Add the initializer name to the parent node's implicit input defs
+  NodeArg* outer_init_nodearg = parent_graph.GetNodeArg(outer_init_name);
+  ASSERT_NE(outer_init_nodearg, nullptr);
+  {
+    // Test hack to tweak an internal structure.
+    auto& node_wrapper = static_cast<NodeWrapper&>(parent_node);
+    node_wrapper.MutableDefinitions().implicit_input_defs.push_back(outer_init_nodearg);
+  }
+
+  // Create subgraph
+  GraphProto subgraph_proto;
+  subgraph_proto.set_name("Subgraph");
+  Graph subgraph(parent_model, &subgraph_proto, parent_graph.DomainToVersionMap(), parent_model.IrVersion(),
+                 nullptr, &parent_graph, &parent_node, DefaultLoggingManager().DefaultLogger(), false);
+
+  // Test retrieval from outer scope
+  OrtValue retrieved;
+  EXPECT_TRUE(subgraph.GetOrtValueInitializer("outer_init", retrieved, true));
+  const Tensor& t = retrieved.Get<Tensor>();
+  EXPECT_EQ(t.Shape().Size(), kTensorSize);
+}
+
+TEST_F(GraphTest, AddInitializedOrtValueWithExternalData) {
+  Model model("TestAddInitializedOrtValue", false, *logger_);
+  Graph& graph = model.MainGraph();
+
+  // Create a TensorProto with external data reference
+  const std::string external_data_init = "external_data_init";
+  auto allocator = CPUAllocator::DefaultInstance();
+  constexpr const int64_t kTensorSize = 256;
+  TensorProto tensor_proto;
+  OrtValue ort_value;
+  CreateIntializerWithDataInMemory(external_data_init, allocator, kTensorSize, tensor_proto, ort_value);
+
+  // Test adding the initialized OrtValue with external data reference
+  ASSERT_STATUS_OK(graph.AddInitializedOrtValue(tensor_proto, ort_value));
+
+  // Verify the initializer was added correctly
+  OrtValue retrieved_value;
+  ASSERT_TRUE(graph.GetOrtValueInitializer(external_data_init, retrieved_value, false));
+
+  // Verify the tensor data
+  const Tensor& retrieved_tensor = retrieved_value.Get<Tensor>();
+  ASSERT_EQ(retrieved_tensor.Shape().Size(), kTensorSize);
+  ASSERT_EQ(retrieved_tensor.DataType(), DataTypeImpl::GetType<float>());
+
+  // Verify the TensorProto was also added and has external data location
+  const TensorProto* retrieved_proto = nullptr;
+  ASSERT_TRUE(graph.GetInitializedTensor(external_data_init, retrieved_proto));
+  ASSERT_NE(retrieved_proto, nullptr);
+  ASSERT_EQ(retrieved_proto->name(), external_data_init);
+  ASSERT_TRUE(utils::HasExternalDataInMemory(tensor_proto));
+}
+
+TEST_F(GraphTest, AddInitializedOrtValueMismatch) {
+  Model model("TestAddInitializedOrtValue_Mismatch", false, *logger_);
+  Graph& graph = model.MainGraph();
+
+  // Create a TensorProto with external data reference
+  const std::string name = "init";
+  constexpr const int64_t kTensorSize = 256;
+  auto allocator = CPUAllocator::DefaultInstance();
+  TensorProto tensor_proto;
+  OrtValue ort_value;
+  TensorShape shape({kTensorSize});
+  CreateIntializerWithDataInMemory(name, allocator, kTensorSize, tensor_proto, ort_value);
+
+  OrtValue ort_value_diff;
+  // Now try to create a value that has a different data type
+  Tensor::InitOrtValue(DataTypeImpl::GetType<int32_t>(), shape, allocator, ort_value_diff);
+  Status status = graph.AddInitializedOrtValue(tensor_proto, ort_value_diff);
+  ASSERT_FALSE(status.IsOK());
+
+  // Create OrtValue with different shape [2]
+  TensorShape diff_shape({2});
+  Tensor::InitOrtValue(DataTypeImpl::GetType<float>(), diff_shape, allocator, ort_value_diff);
+
+  // Fails on shape mismatch
+  status = graph.AddInitializedOrtValue(tensor_proto, ort_value_diff);
+  ASSERT_FALSE(status.IsOK());
+}
+
+TEST_F(GraphTest, AddInitializedOrtValueDuplicate) {
+  Model model("TestAddInitializedOrtValue_Duplicate", false, *logger_);
+  Graph& graph = model.MainGraph();
+
+  // Create a TensorProto with external data reference
+  const std::string name = "init";
+  constexpr const int64_t kTensorSize = 256;
+  auto allocator = CPUAllocator::DefaultInstance();
+  TensorProto tensor_proto;
+  OrtValue ort_value;
+  CreateIntializerWithDataInMemory(name, allocator, kTensorSize, tensor_proto, ort_value);
+
+  // Add the first initializer successfully
+  ASSERT_STATUS_OK(graph.AddInitializedOrtValue(tensor_proto, ort_value));
+
+  // try again
+  Status status = graph.AddInitializedOrtValue(tensor_proto, ort_value);
+  ASSERT_FALSE(status.IsOK());
+}
+
 #ifdef ENABLE_TRAINING
 
 TEST_F(GraphTest, GraphConstruction_MemoryEfficientTopologicalSort_Recompute) {
@@ -2287,6 +2488,85 @@ TEST_F(GraphTest, GraphConstruction_MemoryEfficientTopologicalSort_MultiLayerRec
     for (size_t i = 0; i < order.size(); ++i) {
       auto node = graph.GetNode(order[i]);
       EXPECT_TRUE(node->Name() == expected_priority_based_order[i]) << "MEMORY_EFFICIENT based execution order is wrong.";
+    }
+  }
+}
+
+TEST_F(GraphTest, GraphConstruction_MemoryEfficientTopologicalSort_SubgraphGeneratingNodeHavingNoConsumers) {
+  Model model("graph_1", false, *logger_);
+  auto& graph = model.MainGraph();
+
+  /*
+                         |
+                  node_0 (Identity)
+                     /       \    \
+        node_1 (Identity)     \   Identity
+                    |         |       \_____graph_output_0
+        node_4 (Identity)     |
+                    |         |
+                  YieldOp   recompute_node_1
+                     \       /      \
+               node_1_grad (Merge)   Identity
+                        |               |
+                                   graph_output_1
+  */
+
+  TypeProto tensor_int32;
+  tensor_int32.mutable_tensor_type()->set_elem_type(TensorProto_DataType_INT32);
+  tensor_int32.mutable_tensor_type()->mutable_shape()->add_dim()->set_dim_value(1);
+
+  auto& input_arg0 = graph.GetOrCreateNodeArg("node_0_in_1", &tensor_int32);
+  auto& output_arg0 = graph.GetOrCreateNodeArg("node_0_out_1", &tensor_int32);
+  auto& graph_output_0_identity = graph.GetOrCreateNodeArg("graphoutput_0_identity_out_1", &tensor_int32);
+  auto& output_arg1 = graph.GetOrCreateNodeArg("node_1_out_1", &tensor_int32);
+  auto& output_arg2 = graph.GetOrCreateNodeArg("node_2_out_1", &tensor_int32);
+  auto& output_arg4 = graph.GetOrCreateNodeArg("node_4_out_1", &tensor_int32);
+  auto& output_arg5 = graph.GetOrCreateNodeArg("node_yield_out_1", &tensor_int32);
+  auto& output_arg6 = graph.GetOrCreateNodeArg("node_5_out_1", &tensor_int32);
+
+  graph.AddNode("node_0", "Identity_Fake", "node 0", {&input_arg0}, {&output_arg0});
+  graph.AddNode("node_1", "Identity_Fake", "node 1", {&output_arg0}, {&output_arg1});
+  graph.AddNode("graph_output_0_identity", "Identity_Fake", "graph output 0 identity", {&output_arg0}, {&graph_output_0_identity});
+  graph.AddNode("recompute_node_1", "Identity_Fake", "recompute node 1", {&output_arg0}, {&output_arg2});
+
+  auto& graph_output1_identity = graph.GetOrCreateNodeArg("graphoutput_1_identity_out_1", &tensor_int32);
+  graph.AddNode("graph_output_1_identity", "Identity_Fake", "graph output 1 identity", {&output_arg2}, {&graph_output1_identity});
+
+  graph.AddNode("node_4", "Identity_Fake", "node 4", {&output_arg1}, {&output_arg4});
+
+  ONNX_NAMESPACE::AttributeProto full_shape_outputs;
+  const std::string attribute_name = "full_shape_outputs";
+  full_shape_outputs.set_name(attribute_name);
+  full_shape_outputs.set_type(ONNX_NAMESPACE::AttributeProto::INTS);
+  full_shape_outputs.add_ints(static_cast<int64_t>(0));
+  NodeAttributes attributes({{attribute_name, full_shape_outputs}});
+
+  graph.AddNode("node_yield", "YieldOp", "node yield", {&output_arg4}, {&output_arg5}, &attributes, kMSDomain);
+  graph.AddNode("node_1_grad", "Merge_Fake", "node_1 gradient", {&output_arg5, &output_arg2}, {&output_arg6});
+
+  auto status = graph.Resolve();
+  EXPECT_TRUE(status.IsOK()) << status.ErrorMessage();
+  GraphViewer graph_viewer(graph);
+
+  // MEMORY_EFFICIENT order
+  {
+    auto& order = graph_viewer.GetNodesInTopologicalOrder(ExecutionOrder::MEMORY_EFFICIENT);
+    const std::vector<std::string> expected_order =
+        {
+            "node_0",
+            "node_1",
+            "node_4",
+            "node_yield",
+            "recompute_node_1",
+            "node_1_grad",
+            "graph_output_0_identity",
+            "graph_output_1_identity",
+        };
+    for (size_t i = 0; i < order.size(); ++i) {
+      auto node = graph.GetNode(order[i]);
+      EXPECT_TRUE(node->Name() == expected_order[i])
+          << "MEMORY_EFFICIENT based execution order is wrong. expected node is " << expected_order[i]
+          << " but got " << node->Name();
     }
   }
 }

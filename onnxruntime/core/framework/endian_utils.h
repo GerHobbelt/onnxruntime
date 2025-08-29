@@ -5,7 +5,7 @@
 
 #include <type_traits>
 
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 
 #include "core/common/status.h"
 #include "core/common/common.h"
@@ -30,6 +30,21 @@ namespace utils {
 void SwapByteOrderCopy(size_t element_size_in_bytes,
                        gsl::span<const unsigned char> source_bytes,
                        gsl::span<unsigned char> destination_bytes);
+
+/**
+ * Swaps the byte order of the elements in the given byte span in place.
+ *
+ * This is a low-level function - please be sure to pass in valid arguments.
+ * In particular:
+ * - bytes should have a size that is a multiple of element_size_in_bytes.
+ * - element_size_in_bytes should be greater than zero.
+ * - bytes should not overlap with itself.
+ *
+ * @param element_size_in_bytes The size of an individual element, in bytes.
+ * @param source_bytes The source byte span.
+ */
+void SwapByteOrderInplace(size_t element_size_in_bytes,
+                          gsl::span<std::byte> bytes);
 
 namespace detail {
 

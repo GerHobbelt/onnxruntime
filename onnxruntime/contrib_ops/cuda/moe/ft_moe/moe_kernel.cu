@@ -17,7 +17,8 @@
 // Licensed under the MIT License.
 
 #include <algorithm>
-#include <cuda.h>
+#include <cfloat>
+#include <cuda.h>  // for CUDA_VERSION
 #include <cuda_fp16.h>
 #include <math.h>
 #include <sstream>
@@ -37,18 +38,95 @@
 
 #include "moe_kernel.h"
 
-#if CUDA_VERSION >= 11000
+#include <cuda_runtime_api.h>
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/util_type.cuh>
-#else
-#include "cub/cub.cuh"
-#include "cub/device/device_radix_sort.cuh"
-#include "cub/util_type.cuh"
-#endif
+
+#include "contrib_ops/cuda/utils/dump_cuda_tensor.h"
 
 namespace ort_fastertransformer {
 static constexpr int WARP_SIZE = 32;
+
+// SwiGLU with interleaved is like the following python code using PyTorch:
+//   dim = x.shape[-1]
+//   x = x.view(-1, dim // 2, 2)
+//   x_glu, x_linear = x[..., 0], x[..., 1]
+//   y = x_glu * torch.sigmoid(alpha * x_glu) * (x_linear + 1)
+template <typename T, bool HasLimit>
+__global__ void swiglu_kernel_interleaved(T* output, T const* input, int intermediate_size, int num_rows, float alpha, float limit) {
+  int const row = blockIdx.x;
+  if (row >= num_rows) {
+    return;
+  }
+
+  T const* row_input = input + row * 2 * intermediate_size;
+  T* row_output = output + row * intermediate_size;
+
+  for (int i = threadIdx.x; i < intermediate_size; i += blockDim.x) {
+    float glu = static_cast<float>(row_input[2 * i]);
+    float linear = static_cast<float>(row_input[2 * i + 1]);
+
+    if constexpr (HasLimit) {
+      glu = fminf(glu, limit);
+      linear = fminf(fmaxf(linear, -limit), limit);
+    }
+
+    float sigmoid_arg = alpha * glu;
+    float sigmoid_out = 1.f / (1.f + expf(-sigmoid_arg));
+
+    float swish_out = glu * sigmoid_out;
+    row_output[i] = static_cast<T>(swish_out * (linear + 1.f));
+  }
+}
+
+// Non interleaved version of SwiGLU kernel, which splits each row into two chunks of same size.
+template <typename T, bool HasLimit>
+__global__ void swiglu_kernel_chunked(T* output, T const* input, int intermediate_size, int num_rows, float alpha, float limit) {
+  int const row = blockIdx.x;
+  if (row >= num_rows) {
+    return;
+  }
+
+  T const* row_input = input + row * 2 * intermediate_size;
+  T* row_output = output + row * intermediate_size;
+
+  for (int i = threadIdx.x; i < intermediate_size; i += blockDim.x) {
+    float glu = static_cast<float>(row_input[i]);
+    float linear = static_cast<float>(row_input[i + intermediate_size]);
+
+    if constexpr (HasLimit) {
+      glu = fminf(glu, limit);
+      linear = fminf(fmaxf(linear, -limit), limit);
+    }
+
+    float sigmoid_arg = alpha * glu;
+    float sigmoid_out = 1.f / (1.f + expf(-sigmoid_arg));
+
+    float swish_out = glu * sigmoid_out;
+    row_output[i] = static_cast<T>(swish_out * (linear + 1.f));
+  }
+}
+
+template <typename T, bool IsInterLeaved, bool HasLimit>
+void invokeSwiGLU(T* output, T const* input, int intermediate_size, int num_rows, float alpha, float limit, cudaStream_t stream) {
+  if (num_rows == 0) {
+    return;
+  }
+  dim3 block(std::min(intermediate_size, 1024));
+  dim3 grid(num_rows);
+
+  DUMP_TENSOR_INIT();
+  DUMP_TENSOR("swiglu input", input, num_rows, 2 * intermediate_size);
+
+  if constexpr (IsInterLeaved) {
+    swiglu_kernel_interleaved<T, HasLimit><<<grid, block, 0, stream>>>(output, input, intermediate_size, num_rows, alpha, limit);
+  } else {
+    swiglu_kernel_chunked<T, HasLimit><<<grid, block, 0, stream>>>(output, input, intermediate_size, num_rows, alpha, limit);
+  }
+
+  DUMP_TENSOR("swiglu output", output, num_rows, intermediate_size);
+}
 
 // ====================== Softmax things ===============================
 // We have our own implementation of softmax here so we can support transposing the output
@@ -64,7 +142,6 @@ __launch_bounds__(TPB) __global__
 
   const int thread_row_offset = blockIdx.x * num_cols;
 
-  cub::Sum sum;
   float threadData(-FLT_MAX);
 
   // Don't touch finished rows.
@@ -77,7 +154,12 @@ __launch_bounds__(TPB) __global__
     threadData = max(static_cast<float>(input[idx]), threadData);
   }
 
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12090
+  const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum());
+#else
   const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
+#endif
+
   if (threadIdx.x == 0) {
     float_max = maxElem;
   }
@@ -90,7 +172,12 @@ __launch_bounds__(TPB) __global__
     threadData += exp((static_cast<float>(input[idx]) - float_max));
   }
 
-  const auto Z = BlockReduce(tmpStorage).Reduce(threadData, sum);
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12090
+  const auto Z = BlockReduce(tmpStorage).Reduce(threadData, ::cuda::std::plus());
+#else
+  // Deprecated on CUDA 12.9
+  const auto Z = BlockReduce(tmpStorage).Reduce(threadData, cub::Sum());
+#endif
 
   if (threadIdx.x == 0) {
     normalizing_factor = 1.f / Z;
@@ -126,15 +213,15 @@ __launch_bounds__(TPB) __global__
   const int block_row = blockIdx.x;
 
   const bool should_process_row = finished ? !finished[block_row] : true;
-  const int thread_read_offset = blockIdx.x * num_experts;
+  const int thread_row_offset = blockIdx.x * num_experts;
   float output_row_sum = 0.f;
   for (int k_idx = 0; k_idx < k; ++k_idx) {
     thread_kvp.key = 0;
-    thread_kvp.value = T(-1.f);  // This is OK because inputs are probabilities
+    thread_kvp.value = T(-1.f);
 
     cub_kvp inp_kvp;
     for (int expert = threadIdx.x; expert < num_experts; expert += TPB) {
-      const int idx = thread_read_offset + expert;
+      const int idx = thread_row_offset + expert;
       inp_kvp.key = expert;
       inp_kvp.value = inputs_after_softmax[idx];
 
@@ -164,6 +251,107 @@ __launch_bounds__(TPB) __global__
       }
     }
     __syncthreads();
+  }
+}
+#endif
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+template <typename T, int TPB, int NUM_EXPERTS>
+__launch_bounds__(TPB) __global__ void sparse_mixer_top2(const T*, T*, int*, int*, const float) {
+  // Does not support pre-Kepler architectures
+  ;
+}
+#else
+
+template <typename T, int TPB, int NUM_EXPERTS>
+__launch_bounds__(TPB) __global__
+    void sparse_mixer_top2(const T* inputs, T* output, int* indices, int* source_rows, const float jitter_eps) {
+  static constexpr int K = 2;
+
+  using cub_kvp = cub::KeyValuePair<int, T>;
+  using KVBlockReduce = cub::BlockReduce<cub_kvp, TPB>;
+
+  __shared__ float result_kvp_value[K];
+  __shared__ typename KVBlockReduce::TempStorage kvTmpStorage;
+
+  cub_kvp thread_kvp;
+  cub::ArgMax arg_max;
+
+  int num_rows = gridDim.x;
+  const int block_row = blockIdx.x;
+
+  const int thread_row_offset = blockIdx.x * NUM_EXPERTS;
+
+  float factor[K];
+  bool logits_mask[K];
+
+#pragma unroll
+  for (int k_idx = 0; k_idx < K; ++k_idx) {
+    thread_kvp.key = 0;
+    thread_kvp.value = T(-1.f);
+
+    cub_kvp inp_kvp;
+#pragma unroll
+    for (int expert = threadIdx.x; expert < NUM_EXPERTS; expert += TPB) {
+      const int idx = thread_row_offset + expert;
+      inp_kvp.key = expert;
+      inp_kvp.value = inputs[idx];
+
+      for (int prior_k = 0; prior_k < k_idx; ++prior_k) {
+        const int prior_winning_expert = indices[K * block_row + prior_k];
+
+        if (prior_winning_expert == expert) {
+          inp_kvp = thread_kvp;
+        }
+      }
+
+      thread_kvp = arg_max(inp_kvp, thread_kvp);
+    }
+
+    const cub_kvp result_kvp = KVBlockReduce(kvTmpStorage).Reduce(thread_kvp, arg_max);
+    if (threadIdx.x == 0) {
+      const int idx = K * block_row + k_idx;
+      result_kvp_value[k_idx] = (float)result_kvp.value;
+      indices[idx] = result_kvp.key;
+      source_rows[idx] = k_idx * num_rows + block_row;
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int expert = threadIdx.x; expert < NUM_EXPERTS; expert += TPB) {
+      const int idx = thread_row_offset + expert;
+      factor[k_idx] = max(abs((float)inputs[idx]), result_kvp_value[k_idx]);
+      logits_mask[k_idx] = (result_kvp_value[k_idx] - (float)inputs[idx]) > (2 * jitter_eps * factor[k_idx]);
+      if (k_idx == 1 && expert == indices[K * block_row]) {
+        logits_mask[1] = true;
+      }
+    }
+  }
+
+#pragma unroll
+  for (int k_idx = 0; k_idx < K; ++k_idx) {
+    float row_sum(0);
+
+#pragma unroll
+    for (int ii = threadIdx.x; ii < NUM_EXPERTS; ii += TPB) {
+      const int idx = thread_row_offset + ii;
+      row_sum += logits_mask[k_idx] ? 0 : exp((static_cast<float>(inputs[idx]) - result_kvp_value[k_idx]));
+    }
+
+#pragma unroll
+    for (int mask = NUM_EXPERTS / 2; mask > 0; mask /= 2) {
+      row_sum += __shfl_xor_sync(0xFFFFFFFF, row_sum, mask, NUM_EXPERTS);
+    }
+
+    const float normalizing_factor = 1.f / row_sum;
+
+    const int idx = K * block_row + k_idx;
+    if (threadIdx.x == indices[idx]) {
+      const int input_idx = thread_row_offset + threadIdx.x;
+      output[idx] = logits_mask[k_idx] ? 0
+                                       : exp((static_cast<float>(inputs[input_idx]) - result_kvp_value[k_idx])) *
+                                             normalizing_factor;
+    }
   }
 }
 #endif
@@ -227,7 +415,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
   const int thread_row = warp_base_row + thread_row_in_warp;
 
   // Threads with indices out of bounds should early exit here.
-  if (thread_row >= num_rows) return;
+  if (thread_row >= num_rows)
+    return;
   const bool should_process_row = finished ? !finished[thread_row] : true;
 
   // We finally start setting up the read pointers for each thread. First, each thread jumps to the start of the
@@ -351,7 +540,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
       if (normalize_routing_weights && k_idx == k - 1) {
 #pragma unroll
         for (int ki = 0; ki < k; ++ki) {
-          output[idx - ki] = T(static_cast<float>(output[idx - ki]) / output_row_sum);
+          float old_val = static_cast<float>(output[idx - ki]);
+          output[idx - ki] = T(old_val / output_row_sum);
         }
       }
     }
@@ -405,8 +595,29 @@ void topk_gating_softmax_launcher_helper(const T* input, const bool* finished, T
 template <typename T>
 void topk_gating_softmax_kernelLauncher(const T* input, const bool* finished, T* output, T* softmax_temp_output,
                                         int* indices, int* source_row, int num_rows, int num_experts, int k,
-                                        bool normalize_routing_weights, cudaStream_t stream) {
+                                        bool normalize_routing_weights, bool use_sparse_mixer, cudaStream_t stream) {
   static constexpr int WARPS_PER_TB = 4;
+
+  if (use_sparse_mixer) {
+    static constexpr int TPB = WARP_SIZE * WARPS_PER_TB;
+    static constexpr float jitter_eps = 0.01f;
+
+    switch (num_experts) {
+      case 8: {
+        sparse_mixer_top2<T, TPB, 8><<<num_rows, TPB, 0, stream>>>(input, output, indices, source_row, jitter_eps);
+        break;
+      }
+      case 16: {
+        sparse_mixer_top2<T, TPB, 16><<<num_rows, TPB, 0, stream>>>(input, output, indices, source_row, jitter_eps);
+        break;
+      }
+
+      default: {
+        ORT_THROW("Sparse mixer only supports 8 and 16 experts");
+      }
+    }
+    return;
+  }
 
   switch (num_experts) {
     case 2: {
@@ -440,13 +651,13 @@ void topk_gating_softmax_kernelLauncher(const T* input, const bool* finished, T*
       break;
     }
     case 128: {
-      topk_gating_softmax_launcher_helper<T, 128, WARPS_PER_TB>(input, finished, output, indices, source_row, num_rows,
-                                                                num_experts, k, normalize_routing_weights, stream);
+      topk_gating_softmax_launcher_helper<T, 128, WARPS_PER_TB>(
+          input, finished, output, indices, source_row, num_rows, num_experts, k, normalize_routing_weights, stream);
       break;
     }
     case 256: {
-      topk_gating_softmax_launcher_helper<T, 256, WARPS_PER_TB>(input, finished, output, indices, source_row, num_rows,
-                                                                num_experts, k, normalize_routing_weights, stream);
+      topk_gating_softmax_launcher_helper<T, 256, WARPS_PER_TB>(
+          input, finished, output, indices, source_row, num_rows, num_experts, k, normalize_routing_weights, stream);
       break;
     }
     default: {
@@ -485,8 +696,9 @@ void CubKeyValueSorter::run(void* workspace, const size_t workspace_size, const 
   size_t actual_ws_size = workspace_size;
 
   if (expected_ws_size > workspace_size) {
-    ORT_THROW("Error. The allocated workspace is too small to run this problem. Expected workspace size of at least ",
-              expected_ws_size, " but got problem size ", workspace_size, "\n");
+    ORT_THROW(
+        "Error. The allocated workspace is too small to run this problem. Expected workspace size of at least ",
+        expected_ws_size, " but got problem size ", workspace_size, "\n");
   }
   cub::DeviceRadixSort::SortPairs(workspace, actual_ws_size, keys_in, keys_out, values_in, values_out,
                                   (int)num_key_value_pairs, 0, num_bits_, stream);
@@ -514,7 +726,8 @@ __global__ void compute_total_rows_before_expert_kernel(const int* sorted_expert
                                                         const int64_t num_experts, int64_t* total_rows_before_expert) {
   // First, compute the global tid. We only need 1 thread per expert.
   const int expert = blockIdx.x * blockDim.x + threadIdx.x;
-  if (expert >= num_experts) return;
+  if (expert >= num_experts)
+    return;
 
   // This should construct the last index where each expert occurs.
   total_rows_before_expert[expert] = find_total_elts_leq_target(sorted_experts, sorted_experts_len, expert);
@@ -538,12 +751,14 @@ __global__ void dispatch_activations_kernel(int64_t* total_rows_before_expert, i
 }
 
 template <typename T, typename WeightType, typename Enable>
-CutlassMoeFCRunner<T, WeightType, Enable>::CutlassMoeFCRunner(int sm_version, bool has_fc3,
-                                                              bool normalize_routing_weights)
-    : has_fc3_(has_fc3),
+CutlassMoeFCRunner<T, WeightType, Enable>::CutlassMoeFCRunner(int sm_version, ActivationType activation_type, bool has_fc3,
+                                                              bool normalize_routing_weights, bool use_sparse_mixer)
+    : activation_type_(activation_type),
+      has_fc3_(has_fc3),
       total_past_rows_(0),
       total_covered_rows_(0),
-      normalize_routing_weights_(normalize_routing_weights) {
+      normalize_routing_weights_(normalize_routing_weights),
+      use_sparse_mixer_(use_sparse_mixer) {
   moe_gemm_runner_.initialize(sm_version);
 }
 
@@ -570,8 +785,16 @@ size_t CutlassMoeFCRunner<T, WeightType, Enable>::getWorkspaceSize(size_t num_ro
   total_ws_bytes += buf_size * sizeof(T);                    // permuted_data
   total_ws_bytes += padded_experts * sizeof(int64_t);        // Hold total_rows_before_expert_
   total_ws_bytes += num_softmax_outs * sizeof(T);
-  const size_t bytes_for_fc1_result = has_fc3_ ? 2 * interbuf_size * sizeof(T) : interbuf_size * sizeof(T);
-  const size_t sorter_ws_size_bytes = pad_to_multiple_of_16(sorter_.getWorkspaceSize(num_rows));
+
+  size_t bytes_for_fc1_result;
+  if (activation_type_ == ActivationType::SwiGLU) {
+    // Space for both fc1_result_ and act_result_.
+    bytes_for_fc1_result = (2 * interbuf_size + interbuf_size) * sizeof(T);
+  } else {
+    bytes_for_fc1_result = has_fc3_ ? 2 * interbuf_size * sizeof(T) : interbuf_size * sizeof(T);
+  }
+
+  const size_t sorter_ws_size_bytes = pad_to_multiple_of_16(sorter_.getWorkspaceSize(k * num_rows));
   sorter_.update_num_experts(static_cast<int>(num_experts));
 
   size_t bytes_for_intermediate_and_sorting = bytes_for_fc1_result;
@@ -580,7 +803,7 @@ size_t CutlassMoeFCRunner<T, WeightType, Enable>::getWorkspaceSize(size_t num_ro
     bytes_for_intermediate_and_sorting += remaining_bytes;
   }
 
-  total_ws_bytes += bytes_for_intermediate_and_sorting;  // intermediate (fc1) output + cub sorting workspace
+  total_ws_bytes += bytes_for_intermediate_and_sorting;
   return total_ws_bytes;
 }
 
@@ -600,27 +823,49 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::configure_ws_ptrs(char* ws_ptr, 
 
   total_rows_before_expert_ = reinterpret_cast<int64_t*>(permuted_data_ + buf_size);
 
-  if (has_fc3_) {
-    fc3_result_ = reinterpret_cast<T*>(total_rows_before_expert_ + padded_experts);
-    fc1_result_ = reinterpret_cast<T*>(fc3_result_ + interbuf_size);
+  char* current_ptr = reinterpret_cast<char*>(total_rows_before_expert_ + padded_experts);
+
+  if (activation_type_ == ActivationType::SwiGLU) {
+    // fc1_result_ is used for GEMM1 output (2 * inter_size)
+    fc1_result_ = reinterpret_cast<T*>(current_ptr);
+    current_ptr += 2 * interbuf_size * sizeof(T);
+
+    // act_result_ is used for SwiGLU output (inter_size)
+    act_result_ = reinterpret_cast<T*>(current_ptr);
+    current_ptr += interbuf_size * sizeof(T);
+
+    ORT_ENFORCE(!has_fc3_, "SwiGLU activation is not supported with fc3");
   } else {
-    fc1_result_ = reinterpret_cast<T*>(total_rows_before_expert_ + padded_experts);
+    fc1_result_ = reinterpret_cast<T*>(current_ptr);
+    act_result_ = nullptr;  // No extra buffer for activation since it is done inplace.
+    current_ptr += interbuf_size * sizeof(T);
+  }
+
+  if (has_fc3_) {
+    fc3_result_ = reinterpret_cast<T*>(current_ptr);
+    current_ptr += interbuf_size * sizeof(T);
+  } else {
+    fc3_result_ = nullptr;
   }
 
   const bool is_pow_2 = (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
   if (!is_pow_2 || num_experts > 256) {
-    softmax_out_ = reinterpret_cast<T*>(fc1_result_ + interbuf_size);
+    softmax_out_ = reinterpret_cast<T*>(current_ptr);
   } else {
     softmax_out_ = nullptr;
   }
 }
 
 namespace {
-
-struct __align__(8) Half4 {
+typedef struct __CUDA_ALIGN__(8) {
   half2 x;
   half2 y;
-};
+} half2_2;
+
+typedef struct __CUDA_ALIGN__(8) {
+  __nv_bfloat162 x;
+  __nv_bfloat162 y;
+} __nv_bfloat162_2;
 
 // TODO(wy): move to common header
 template <typename T>
@@ -631,7 +876,11 @@ struct T4<float> {
 };
 template <>
 struct T4<half> {
-  using Type = Half4;
+  using Type = half2_2;
+};
+template <>
+struct T4<__nv_bfloat16> {
+  using Type = __nv_bfloat162_2;
 };
 
 template <typename T>
@@ -644,6 +893,10 @@ template <>
 struct T2<half> {
   using Type = half2;
 };
+template <>
+struct T2<__nv_bfloat16> {
+  using Type = __nv_bfloat162;
+};
 
 inline __device__ float2 operator*(const float2 a, const float2 b) { return make_float2(a.x * b.x, a.y * b.y); }
 
@@ -654,25 +907,33 @@ inline __device__ float4 operator*(const float4 a, const float4 b) {
 // TODO(wy): use cuda common header and investigate pipeline build issue.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530 && \
     ((__CUDACC_VER_MAJOR__ < 12) || ((__CUDACC_VER_MAJOR__ == 12) && (__CUDACC_VER_MINOR__ < 2)))
-inline __device__ half operator*(const half a, const half b) {
-  return __float2half(__half2float(a) * __half2float(b));
-}
+inline __device__ half operator*(const half a, const half b) { return __float2half(__half2float(a) * __half2float(b)); }
 
-inline __device__ half2 operator*(const half2 a, const half2 b) {
-  return make_half2(a.x * b.x, a.y * b.y);
-}
+inline __device__ half2 operator*(const half2 a, const half2 b) { return make_half2(a.x * b.x, a.y * b.y); }
 #endif
 
 // TODO(wy): use cuda common header and investigate pipeline build issue.
-inline __device__ Half4 operator*(const Half4 a, const Half4 b) {
+inline __device__ half2_2 operator*(const half2_2 a, const half2_2 b) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530 && \
     ((__CUDACC_VER_MAJOR__ < 12) || ((__CUDACC_VER_MAJOR__ == 12) && (__CUDACC_VER_MINOR__ < 2)))
-  Half4 result;
+  half2_2 result;
   result.x = a.x * b.x;
   result.y = a.y * b.y;
   return result;
 #else
-  return Half4{__hmul2(a.x, b.x), __hmul2(a.y, b.y)};
+  return half2_2{__hmul2(a.x, b.x), __hmul2(a.y, b.y)};
+#endif
+}
+
+inline __device__ __nv_bfloat162_2 operator*(const __nv_bfloat162_2 a, const __nv_bfloat162_2 b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800 && \
+    ((__CUDACC_VER_MAJOR__ < 12) || ((__CUDACC_VER_MAJOR__ == 12) && (__CUDACC_VER_MINOR__ < 2)))
+  __nv_bfloat162_2 result;
+  result.x = a.x * b.x;
+  result.y = a.y * b.y;
+  return result;
+#else
+  return __nv_bfloat162_2{__hmul2(a.x, b.x), __hmul2(a.y, b.y)};
 #endif
 }
 
@@ -724,56 +985,106 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(
 
   if (scales_required) {
     if (fc1_scales == nullptr) {
-      ORT_THROW("[FT Error][Run MoE FC] Scales expected but scale for first matmul is a null pointer");
+      ORT_THROW("[Run MoE FC] Scales expected but scale for first matmul is a null pointer");
     } else if (fc2_scales == nullptr) {
-      ORT_THROW("[FT Error][Run MoE FC] Scales expected but scale for second matmul is a null pointer");
+      ORT_THROW("[Run MoE FC] Scales expected but scale for second matmul is a null pointer");
     }
   } else {
     if (fc1_scales != nullptr) {
-      ORT_THROW("[FT Error][Run MoE FC] Scales are ignored for fp32/fp16/bf16 but received scale for FC1");
+      ORT_THROW("[Run MoE FC] Scales are ignored for fp32/fp16/bf16 but received scale for FC1");
     } else if (fc2_scales != nullptr) {
-      ORT_THROW("[FT Error][Run MoE FC] Scales are ignored for fp32/fp16/bf16 but received scale for FC2");
+      ORT_THROW("[Run MoE FC] Scales are ignored for fp32/fp16/bf16 but received scale for FC2");
     }
   }
 
   configure_ws_ptrs(workspace_ptr, static_cast<size_t>(num_rows), static_cast<size_t>(hidden_size),
                     static_cast<size_t>(inter_size), static_cast<size_t>(num_experts), static_cast<size_t>(k));
   topk_gating_softmax_kernelLauncher<T>(gating_output, finished, expert_scales, softmax_out_, expert_for_source_row,
-                                        source_rows_, num_rows, num_experts, k, normalize_routing_weights_, stream);
+                                        source_rows_, num_rows, num_experts, k, normalize_routing_weights_,
+                                        use_sparse_mixer_, stream);
 
   const int sorter_ws_size_bytes = static_cast<int>(pad_to_multiple_of_16(sorter_.getWorkspaceSize(k * num_rows)));
   sorter_.run(reinterpret_cast<void*>(fc1_result_), sorter_ws_size_bytes, expert_for_source_row, permuted_experts_,
               source_rows_, permuted_rows_, k * num_rows, stream);
 
   initialize_moe_routing_kernelLauncher(input_activations, permuted_data_, permuted_rows_,
-                                        expanded_source_row_to_expanded_dest_row, num_rows, active_rows, hidden_size, k,
-                                        stream);
+                                        expanded_source_row_to_expanded_dest_row, num_rows, active_rows, hidden_size,
+                                        k, stream);
 
   const int expanded_active_expert_rows = k * active_rows;
   compute_total_rows_before_expert(permuted_experts_, expanded_active_expert_rows, num_experts,
                                    total_rows_before_expert_, stream);
 
   if (local_num_experts < num_experts) {
-    dispatch_activations(total_rows_before_expert_, num_experts, local_num_experts, local_experts_start_index, stream);
+    dispatch_activations(total_rows_before_expert_, num_experts, local_num_experts, local_experts_start_index,
+                         stream);
   }
 
-  moe_gemm_runner_.moe_gemm_bias_act(permuted_data_ + total_past_rows_ * hidden_size, fc1_expert_weights, fc1_scales,
-                                     fc1_expert_biases, fc1_result_ + total_past_rows_ * inter_size,
-                                     total_rows_before_expert_ + local_experts_start_index, expanded_active_expert_rows,
-                                     inter_size, hidden_size, local_num_experts, fc1_activation_type, stream);
+  if (fc1_activation_type == ActivationType::SwiGLU) {
+    T* gemm1_output_buffer = fc1_result_;
+    T* swiglu_output_buffer = act_result_;
+
+    moe_gemm_runner_.moe_gemm_bias_act(
+        permuted_data_ + total_past_rows_ * hidden_size,
+        fc1_expert_weights,
+        fc1_scales,
+        fc1_expert_biases,
+        gemm1_output_buffer + total_past_rows_ * 2 * inter_size,
+        total_rows_before_expert_ + local_experts_start_index,
+        expanded_active_expert_rows,
+        2 * inter_size,
+        hidden_size,
+        local_num_experts,
+        ActivationType::Identity,
+        stream);
+
+    constexpr bool swiglu_interleaved = true;
+    constexpr bool swiglu_has_limit = true;
+    constexpr float swiglu_alpha = 1.702f;
+    constexpr float swiglu_limit = 7.0f;
+    invokeSwiGLU<T, swiglu_interleaved, swiglu_has_limit>(
+        swiglu_output_buffer + total_past_rows_ * inter_size,
+        gemm1_output_buffer + total_past_rows_ * 2 * inter_size,
+        inter_size,
+        static_cast<int>(total_covered_rows_),
+        swiglu_alpha,
+        swiglu_limit,
+        stream);
+
+    moe_gemm_runner_.moe_gemm(
+        swiglu_output_buffer + total_past_rows_ * inter_size,
+        fc2_expert_weights,
+        fc2_scales,
+        nullptr,
+        fc2_result + total_past_rows_ * hidden_size,
+        total_rows_before_expert_ + local_experts_start_index,
+        expanded_active_expert_rows,
+        hidden_size,
+        inter_size,
+        local_num_experts,
+        stream);
+
+    // No fc3 for SwiGLU
+    return;
+  }
+
+  moe_gemm_runner_.moe_gemm_bias_act(
+      permuted_data_ + total_past_rows_ * hidden_size, fc1_expert_weights, fc1_scales, fc1_expert_biases,
+      fc1_result_ + total_past_rows_ * inter_size, total_rows_before_expert_ + local_experts_start_index,
+      expanded_active_expert_rows, inter_size, hidden_size, local_num_experts, fc1_activation_type, stream);
 
   if (has_fc3_) {
     if (scales_required) {
       if (fc3_scales == nullptr) {
-        ORT_THROW("[FT Error][Run MoE FC] Scales expected but scale for third matmul is a null pointer");
+        ORT_THROW("[Run MoE FC] Scales expected but scale for third matmul is a null pointer");
       }
     } else {
       if (fc3_scales != nullptr) {
-        ORT_THROW("[FT Error][Run MoE FC] Scales are ignored for fp32/fp16/bf16 but received scale for FC3");
+        ORT_THROW("[Run MoE FC] Scales are ignored for fp32/fp16/bf16 but received scale for FC3");
       }
     }
     if (fc3_expert_weights == nullptr) {
-      ORT_THROW("[FT Error][Run MoE FC] FC3 weights are null");
+      ORT_THROW("[Run MoE FC] FC3 weights are null");
     }
     moe_gemm_runner_.moe_gemm(permuted_data_ + total_past_rows_ * hidden_size, fc3_expert_weights, fc3_scales,
                               fc3_expert_biases, fc3_result_ + total_past_rows_ * inter_size,
@@ -792,12 +1103,13 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 700
 template <typename T, typename WeightType, typename Enable>
-void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*, const T*, const WeightType*, const T*, const T*,
-                                                           ActivationType, const WeightType*, const T*, const T*,
-                                                           const WeightType*, const T*, int, const int, const int, int,
-                                                           int, int, int k, char*, T*, T*, int*, int*, cudaStream_t) {
+void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*, const T*, const WeightType*, const T*,
+                                                           const T*, ActivationType, const WeightType*, const T*,
+                                                           const T*, const WeightType*, const T*, int, const int,
+                                                           const int, int, int, int, int k, char*, T*, T*, int*,
+                                                           int*, cudaStream_t) {
   // MoE gemm only supports Volta+ architectures
-  ORT_THROW("[FT Error][Run MoE FC] MoE gemm only supports Volta+ architectures");
+  ORT_THROW("[Run MoE FC] MoE gemm only supports Volta+ architectures");
 }
 #else
 template <typename T, typename WeightType, typename Enable>
@@ -811,7 +1123,8 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(
   run_moe_fc(input_activations, gating_output, fc1_expert_weights, fc1_scales, fc1_expert_biases, fc1_activation_type,
              fc3_expert_weights, fc3_scales, fc3_expert_biases, fc2_expert_weights, fc2_scales, num_rows, hidden_size,
              inter_size, num_experts, local_num_experts, local_experts_start_index, k, workspace_ptr, fc2_result,
-             nullptr, num_rows, expert_scales, expanded_source_row_to_expanded_dest_row, expert_for_source_row, stream);
+             nullptr, num_rows, expert_scales, expanded_source_row_to_expanded_dest_row, expert_for_source_row,
+             stream);
 }
 #endif
 
@@ -844,8 +1157,8 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::dispatch_activations(int64_t* to
   cudaEventCreateWithFlags(&copy_event, cudaEventDisableTiming);
   cudaEventRecord(copy_event, stream);
 
-  dispatch_activations_kernel<<<blocks, threads, 0, stream>>>(total_rows_before_expert, num_experts, local_num_experts,
-                                                              local_experts_start_index);
+  dispatch_activations_kernel<<<blocks, threads, 0, stream>>>(total_rows_before_expert, num_experts,
+                                                              local_num_experts, local_experts_start_index);
 
   get_total_rows_info(local_experts_start_index, local_num_experts, total_past_rows_, total_covered_rows_);
 }
@@ -862,6 +1175,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::get_total_rows_info(int64_t expe
   if (experts_start_index > 0) {
     total_past_rows = total_rows_before_expert_host_[experts_start_index - 1];
   }
+
   total_covered_rows = total_rows_before_expert_host_[experts_end_index] - total_past_rows;
 }
 
@@ -874,9 +1188,9 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::get_total_rows_info(int64_t expe
 // experts in the end.
 
 // Note that the expanded_dest_row_to_expanded_source_row map referred to here has indices in the range (0,
-// k*rows_in_input - 1). However, it is set up so that index 0, rows_in_input, 2*rows_in_input ... (k-1)*rows_in_input
-// all map to row 0 in the original matrix. Thus, to know where to read in the source matrix, we simply take the modulus
-// of the expanded index.
+// k*rows_in_input - 1). However, it is set up so that index 0, rows_in_input, 2*rows_in_input ...
+// (k-1)*rows_in_input all map to row 0 in the original matrix. Thus, to know where to read in the source matrix, we
+// simply take the modulus of the expanded index.
 
 template <typename T>
 __global__ void initialize_moe_routing_kernel(const T* unpermuted_input, T* permuted_output,
@@ -884,9 +1198,9 @@ __global__ void initialize_moe_routing_kernel(const T* unpermuted_input, T* perm
                                               int* expanded_source_row_to_expanded_dest_row, int num_rows,
                                               int active_rows, int cols) {
   // Reverse permutation map.
-  // I do this so that later, we can use the source -> dest map to do the k-way reduction and unpermuting. I need the
-  // reverse map for that reduction to allow each threadblock to do 1 k-way reduce without atomics later in MoE. 1
-  // thread block will be responsible for all k summations.
+  // I do this so that later, we can use the source -> dest map to do the k-way reduction and unpermuting. I need
+  // the reverse map for that reduction to allow each threadblock to do 1 k-way reduce without atomics later in
+  // MoE. 1 thread block will be responsible for all k summations.
   const int expanded_dest_row = blockIdx.x;
   const int expanded_source_row = expanded_dest_row_to_expanded_source_row[expanded_dest_row];
   if (threadIdx.x == 0) {
@@ -923,7 +1237,7 @@ void initialize_moe_routing_kernelLauncher(const T* unpermuted_input, T* permute
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
 template <typename T, int RESIDUAL_NUM>
 __global__ void finalize_moe_routing_kernel(const T*, T*, const T*, const T*, const T*, const T*, const int*,
-                                            const int*, int, const int) {
+                                            const int*, int, int) {
   // Does not support pre-Kepler architectures
   ;
 }
@@ -1019,34 +1333,48 @@ void finalize_moe_routing_kernelLauncher(const T* expanded_permuted_rows, T* red
 }
 
 // ========================= TopK Softmax specializations ===========================
-template void topk_gating_softmax_kernelLauncher(const float*, const bool*, float*, float*, int*, int*, int, int, int,
-                                                 bool, cudaStream_t);
-template void topk_gating_softmax_kernelLauncher(const half*, const bool*, half*, half*, int*, int*, int, int, int,
-                                                 bool, cudaStream_t);
+template void topk_gating_softmax_kernelLauncher(const float*, const bool*, float*, float*, int*, int*, int, int,
+                                                 int, bool, bool, cudaStream_t);
+template void topk_gating_softmax_kernelLauncher(const half*, const bool*, half*, half*, int*, int*, int, int,
+                                                 int, bool, bool, cudaStream_t);
+template void topk_gating_softmax_kernelLauncher(const __nv_bfloat16*, const bool*, __nv_bfloat16*, __nv_bfloat16*, int*, int*, int, int,
+                                                 int, bool, bool, cudaStream_t);
 
 // ==================== Variable batched GEMM specializations ==================================
 template class CutlassMoeFCRunner<float, float>;
 template class CutlassMoeFCRunner<half, half>;
+template class CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16>;
+// For qMoE:
 template class CutlassMoeFCRunner<half, cutlass::uint4b_t>;
+template class CutlassMoeFCRunner<half, uint8_t>;
+template class CutlassMoeFCRunner<__nv_bfloat16, cutlass::uint4b_t>;
+template class CutlassMoeFCRunner<__nv_bfloat16, uint8_t>;
 
 // ===================== Specializations for init routing =========================
 template void initialize_moe_routing_kernelLauncher(const float*, float*, const int*, int*, int, int, int, int,
                                                     cudaStream_t);
 template void initialize_moe_routing_kernelLauncher(const half*, half*, const int*, int*, int, int, int, int,
                                                     cudaStream_t);
+template void initialize_moe_routing_kernelLauncher(const __nv_bfloat16*, __nv_bfloat16*, const int*, int*, int, int, int, int,
+                                                    cudaStream_t);
 
 // ==================== Specializations for final routing ===================================
 template void finalize_moe_routing_kernelLauncher(const float*, float*, const float*, const float*, const int*,
                                                   const int*, int, int, int, cudaStream_t);
-template void finalize_moe_routing_kernelLauncher(const half*, half*, const half*, const half*, const int*, const int*,
-                                                  int, int, int, cudaStream_t);
+template void finalize_moe_routing_kernelLauncher(const half*, half*, const half*, const half*, const int*,
+                                                  const int*, int, int, int, cudaStream_t);
 template void finalize_moe_routing_kernelLauncher(const float*, float*, const float*, const float*, const float*,
                                                   const int*, const int*, int, int, int, cudaStream_t);
-template void finalize_moe_routing_kernelLauncher(const half*, half*, const half*, const half*, const half*, const int*,
-                                                  const int*, int, int, int, cudaStream_t);
+template void finalize_moe_routing_kernelLauncher(const half*, half*, const half*, const half*, const half*,
+                                                  const int*, const int*, int, int, int, cudaStream_t);
 template void finalize_moe_routing_kernelLauncher(const float*, float*, const float*, const float*, const float*,
                                                   const float*, const int*, const int*, int, int, int, cudaStream_t);
 template void finalize_moe_routing_kernelLauncher(const half*, half*, const half*, const half*, const half*,
                                                   const half*, const int*, const int*, int, int, int, cudaStream_t);
+template void finalize_moe_routing_kernelLauncher(const __nv_bfloat16*, __nv_bfloat16*, const __nv_bfloat16*,
+                                                  const __nv_bfloat16*, const int*, const int*, int, int, int, cudaStream_t);
+
+template void invokeSwiGLU<float, true, true>(float*, float const*, int, int, float, float, cudaStream_t);
+template void invokeSwiGLU<half, true, true>(half*, half const*, int, int, float, float, cudaStream_t);
 
 }  // namespace ort_fastertransformer

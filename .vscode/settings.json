@@ -8,21 +8,11 @@
     ],
     "[python]": {
         "editor.tabSize": 4,
-        // Auto sort imports
-        "editor.formatOnSave": true,
-        "editor.codeActionsOnSave": {
-            "source.organizeImports": "explicit"
-        },
-        "editor.defaultFormatter": "ms-python.black-formatter"
     },
-    // Enable Python linting and Pylance type checking
-    "python.analysis.typeCheckingMode": "basic",
     "cpplint.lineLength": 120,
     "cpplint.filters": [
         "-build/include_subdir",
         "-runtime/references"
     ],
-    "files.associations": {
-        "span": "cpp"
-    }
+    "C_Cpp.autoAddFileAssociations": false
 }

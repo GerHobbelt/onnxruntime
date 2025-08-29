@@ -26,7 +26,9 @@ limitations under the License.
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#if !defined(_AIX)
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 #include <iostream>
@@ -43,8 +45,12 @@ limitations under the License.
 #define ORT_USE_CPUINFO
 #endif
 
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__)
+#include <sys/sysctl.h>
+#endif
+
 #include "core/common/common.h"
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 #include "core/common/logging/logging.h"
 #include "core/common/narrow.h"
 #include "core/platform/scoped_resource.h"
@@ -56,15 +62,8 @@ namespace {
 
 constexpr int OneMillion = 1000000;
 
-class UnmapFileParam {
- public:
-  void* addr;
-  size_t len;
-};
-
-static void UnmapFile(void* param) noexcept {
-  std::unique_ptr<UnmapFileParam> p(reinterpret_cast<UnmapFileParam*>(param));
-  int ret = munmap(p->addr, p->len);
+static void UnmapFile(void* addr, size_t len) noexcept {
+  int ret = munmap(addr, len);
   if (ret != 0) {
     auto [err_no, err_msg] = GetErrnoInfo();
     LOGS_DEFAULT(ERROR) << "munmap failed. error code: " << err_no << " error msg: " << err_msg;
@@ -224,13 +223,11 @@ class PosixThread : public EnvThread {
         } else {
           errno = ret;
           auto [err_no, err_msg] = GetErrnoInfo();
-#if !defined(USE_MIGRAPHX)
           LOGS_DEFAULT(ERROR) << "pthread_setaffinity_np failed for thread: " << syscall(SYS_gettid)
                               << ", index: " << p->index
                               << ", mask: " << *p->affinity
                               << ", error code: " << err_no << " error msg: " << err_msg
                               << ". Specify the number of threads explicitly so the affinity is not set.";
-#endif
         }
       }
 #endif
@@ -300,6 +297,22 @@ class PosixEnv : public Env {
       ret.resize(GetNumPhysicalCpuCores());
     }
     return ret;
+  }
+
+  int GetL2CacheSize() const override {
+#ifdef _SC_LEVEL2_CACHE_SIZE
+    return static_cast<int>(sysconf(_SC_LEVEL2_CACHE_SIZE));
+#else
+    int value = 0;  // unknown
+#if (defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__)) && defined(HW_L2CACHESIZE)
+    int mib[2] = {CTL_HW, HW_L2CACHESIZE};
+    size_t len = sizeof(value);
+    if (sysctl(mib, 2, &value, &len, NULL, 0) < 0) {
+      return -1;  // error
+    }
+#endif
+    return value;
+#endif
   }
 
   void SleepForMicroseconds(int64_t micros) const override {
@@ -429,7 +442,9 @@ class PosixEnv : public Env {
 
     mapped_memory =
         MappedMemoryPtr{reinterpret_cast<char*>(mapped_base) + offset_to_page,
-                        OrtCallbackInvoker{OrtCallback{UnmapFile, new UnmapFileParam{mapped_base, mapped_length}}}};
+                        [mapped_base, mapped_length](void*) {
+                          UnmapFile(mapped_base, mapped_length);
+                        }};
 
     return Status::OK();
   }
@@ -447,6 +462,14 @@ class PosixEnv : public Env {
       return false;
     }
     return S_ISDIR(sb.st_mode);
+  }
+
+  bool FileExists(const std::string& path) const override {
+    struct stat sb;
+    if (stat(path.c_str(), &sb)) {
+      return false;
+    }
+    return S_ISREG(sb.st_mode);
   }
 
   common::Status CreateFolder(const std::string& path) const override {

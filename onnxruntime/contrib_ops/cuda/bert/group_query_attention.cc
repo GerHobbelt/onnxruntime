@@ -5,7 +5,7 @@
 #include "core/platform/env_var_utils.h"
 #include "contrib_ops/cuda/bert/group_query_attention_impl.h"
 #include "contrib_ops/cuda/bert/group_query_attention.h"
-#include "contrib_ops/cuda/bert/group_query_attention_helper.h"
+#include "contrib_ops/cpu/bert/group_query_attention_helper.h"
 #include "contrib_ops/cuda/bert/cutlass_fmha/memory_efficient_attention.h"
 #include "contrib_ops/cuda/bert/flash_attention/flash_api.h"
 
@@ -45,27 +45,25 @@ GroupQueryAttention<T>::GroupQueryAttention(const OpKernelInfo& info)
   ORT_ENFORCE(info.GetAttr("kv_num_heads", &kv_num_heads).IsOK() && kv_num_heads > 0 && num_heads % kv_num_heads == 0);
   num_heads_ = static_cast<int>(num_heads);
   kv_num_heads_ = static_cast<int>(kv_num_heads);
-  is_past_bsnh_ = false;  // info.GetAttrOrDefault<int64_t>("is_past_bsnh", 1) == 1;
+  is_past_bsnh_ = false;
+  is_unidirectional_ = true;
   local_window_size_ = static_cast<int>(info.GetAttrOrDefault<int64_t>("local_window_size", -1));
   do_rotary_ = info.GetAttrOrDefault<int64_t>("do_rotary", 0) == 1;
   rotary_interleaved_ = info.GetAttrOrDefault<int64_t>("rotary_interleaved", 0) == 1;
   scale_ = info.GetAttrOrDefault<float>("scale", 0.0f);
+  softcap_ = info.GetAttrOrDefault<float>("softcap", 0.0f);
+  use_smooth_softmax_ = info.GetAttrOrDefault<int64_t>("smooth_softmax", 0) == 1;
 
-#if USE_FLASH_ATTENTION
-  disable_flash_attention_ = sizeof(T) != 2 ||
-                             ParseEnvironmentVariableWithDefault<bool>(attention::kDisableFlashAttention, false);
-#else
-  disable_flash_attention_ = true;
-#endif
+  kernel_options_ = this->GetAttentionKernelOptions();
 
-#if USE_MEMORY_EFFICIENT_ATTENTION
-  disable_memory_efficient_attention_ = sizeof(T) != 2 ||
-                                        ParseEnvironmentVariableWithDefault<bool>(attention::kDisableMemoryEfficientAttention, false);
-#else
-  disable_memory_efficient_attention_ = true;
-#endif
+  disable_flash_attention_ = sizeof(T) != 2 || !kernel_options_->UseFlashAttention();
+
+  // Memory efficient attention only supports float and float16, not bfloat16.
+  disable_memory_efficient_attention_ = std::is_same<T, BFloat16>::value || !kernel_options_->UseEfficientAttention();
+
   if (!disable_flash_attention_) {
     zeros_ = this->GetScratchBuffer<int>(kZerosCount, nullptr);
+    CUDA_CALL_THROW(cudaMemset(zeros_.get(), 0, kZerosCount * sizeof(int)));
   }
 }
 
@@ -80,6 +78,14 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* context) const {
   const Tensor* total_seqlen = context->Input<Tensor>(6);
   const Tensor* cos_cache = context->Input<Tensor>(7);
   const Tensor* sin_cache = context->Input<Tensor>(8);
+  const Tensor* position_ids = context->Input<Tensor>(9);
+  const Tensor* attention_bias = context->Input<Tensor>(10);
+  const Tensor* head_sink = context->Input<Tensor>(11);
+
+  if (position_ids != nullptr || attention_bias != nullptr) {
+    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                           "position_ids and attention_bias are not supported in GroupQueryAttention cuda kernel.");
+  }
 
   auto& device_prop = GetDeviceProp();
   GroupQueryAttentionParameters parameters;
@@ -98,17 +104,29 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* context) const {
                                                                 kv_num_heads_,
                                                                 seqlens_k,
                                                                 total_seqlen,
-                                                                is_past_bsnh_,
                                                                 scale_,
+                                                                softcap_,
                                                                 device_prop.maxThreadsPerBlock));
+
+  ORT_RETURN_IF_ERROR(group_query_attention_helper::CheckCustomAttentionInputs(position_ids,
+                                                                               attention_bias,
+                                                                               head_sink,
+                                                                               parameters));
   parameters.local_window_size = local_window_size_;
   parameters.is_unidirectional = is_unidirectional_;
+  parameters.use_smooth_softmax = use_smooth_softmax_ || head_sink != nullptr;
   parameters.zeros_count = kZerosCount;
   parameters.zero_ptr = zeros_.get();
-  // parameters.left_padding = left_padding_;
+
   int sequence_length = parameters.sequence_length;
   parameters.do_rotary = do_rotary_;
   parameters.rotary_interleaved = rotary_interleaved_;
+
+  // The current GQA CUDA implementation will never be able to have a QK output.
+  // GQA CUDA uses either flash attention or memory efficient attention. Neither kernel supports returning the QK output.
+  ORT_RETURN_IF_ERROR(group_query_attention_helper::CheckNoQKOutput(
+      context->OutputCount(),
+      static_cast<int>(Info().GetAttrOrDefault<int64_t>("qk_output", static_cast<int64_t>(QKOutputType::NO_OUTPUT)))));
 
   if (do_rotary_ && (cos_cache == nullptr || sin_cache == nullptr)) {
     return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
@@ -137,9 +155,9 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* context) const {
     // split kv buffer
     using namespace std;
     auto [num_splits, slse_accum_bytes, o_accum_bytes] = onnxruntime::flash::get_num_splits_and_buffer_sizes(
-        parameters.batch_size, parameters.sequence_length, parameters.sequence_length, parameters.num_heads,
+        parameters.batch_size, parameters.sequence_length, parameters.total_sequence_length, parameters.num_heads,
         parameters.head_size, device_prop.multiProcessorCount);
-    parameters.num_splits = num_splits;
+    parameters.num_splits = static_cast<int>(num_splits);
     softmax_lse_accum_bytes = slse_accum_bytes;
     out_accum_bytes = o_accum_bytes;
   }
@@ -158,11 +176,8 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* context) const {
   bool use_memory_efficient_attention =
       !use_flash_attention &&
       !disable_memory_efficient_attention_ &&
-      local_window_size_ == -1 &&
-      (parameters.head_size & 7) == 0 &&
-      parameters.sequence_length <= parameters.seqlen_past_kv_cache + parameters.sequence_length &&
-      (sizeof(T) == 2 || parameters.sequence_length >= attention::kMinSeqLenForMemoryEfficientAttentionFp32) &&
-      has_memory_efficient_attention(sm, sizeof(T) == 2);
+      has_memory_efficient_attention(sm, sizeof(T) == 2, parameters.head_size, parameters.head_size);
+
   // allocate buffers
   size_t kv_buffer_bytes = 0;
   // need a buffer if we must ungroup kv
@@ -196,6 +211,17 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* context) const {
   auto fmha_buffer = GetScratchBuffer<void>(0, context->GetComputeStream());
   auto unpacked_qkv_buffer = GetScratchBuffer<void>(0, context->GetComputeStream());
 #endif
+
+  if (kernel_options_->AllowDebugInfo()) {
+    AttentionKernelDebugInfo debug_info;
+    debug_info.use_flash_attention = use_flash_attention;
+    debug_info.use_efficient_attention = use_memory_efficient_attention;
+
+    debug_info.Print("GroupQueryAttention",
+                     this->Node().Name(),
+                     std::is_same<T, MLFloat16>::value,
+                     std::is_same<T, BFloat16>::value);
+  }
 
   // seqlens_k buffer
   size_t seqlens_k_bytes = 0;
@@ -241,20 +267,9 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* context) const {
     data.out_accum = reinterpret_cast<CudaT*>(out_accum_buffer.get());
   }
   if (seqlens_k_buffer != nullptr) {
-    data.seqlens_k_total = reinterpret_cast<int*>(seqlens_k_buffer.get());
+    data.seqlens_k_buff = reinterpret_cast<int*>(seqlens_k_buffer.get());
   }
   // Memory Efficient Buffers
-  if (k_buffer != nullptr) {
-    data.k = reinterpret_cast<CudaT*>(k_buffer.get());
-    data.v = reinterpret_cast<CudaT*>(v_buffer.get());
-  }
-  if (fmha_buffer != nullptr) {
-    data.fmha_buffer = reinterpret_cast<CudaT*>(fmha_buffer.get());
-  }
-  if (k_buffer != nullptr) {
-    data.k = reinterpret_cast<CudaT*>(k_buffer.get());
-    data.v = reinterpret_cast<CudaT*>(v_buffer.get());
-  }
   if (k_buffer != nullptr) {
     data.k = reinterpret_cast<CudaT*>(k_buffer.get());
     data.v = reinterpret_cast<CudaT*>(v_buffer.get());
@@ -272,6 +287,10 @@ Status GroupQueryAttention<T>::ComputeInternal(OpKernelContext* context) const {
   if (parameters.do_rotary) {
     data.cos_cache = reinterpret_cast<const CudaT*>(cos_cache->Data<T>());
     data.sin_cache = reinterpret_cast<const CudaT*>(sin_cache->Data<T>());
+  }
+
+  if (head_sink != nullptr) {
+    data.head_sink = reinterpret_cast<const CudaT*>(head_sink->Data<T>());
   }
 
   cublasHandle_t cublas = GetCublasHandle(context);

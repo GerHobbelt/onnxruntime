@@ -11,6 +11,11 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 
+namespace onnxruntime {
+class IResourceAccountant;
+class GraphOptimizerRegistry;
+}
+
 namespace WRL {
 template <typename... TInterfaces>
 using Base = Microsoft::WRL::RuntimeClass<
@@ -25,7 +30,6 @@ namespace Dml
     class ReadbackHeap;
     class ExecutionContext;
     class BucketizedBufferAllocator;
-    class CPUAllocator;
     class ExecutionProvider;
 
     class ExecutionProviderImpl : public WRL::Base<Dml::IExecutionProvider,
@@ -38,7 +42,8 @@ namespace Dml
             Dml::ExecutionContext* executionContext,
             bool enableMetacommands,
             bool enableGraphCapture,
-            bool enableCpuSyncSpinning);
+            bool enableCpuSyncSpinning,
+            bool disableMemoryArena);
 
         void ReleaseCompletedReferences();
 
@@ -88,8 +93,10 @@ namespace Dml
         std::vector<std::unique_ptr<onnxruntime::ComputeCapability>>
         GetCapability(
             const onnxruntime::GraphViewer& graph,
-            const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup
-            ) const;
+            const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup,
+            const onnxruntime::GraphOptimizerRegistry& graph_optimizer_registry,
+            onnxruntime::IResourceAccountant* resource_accountant,
+            const onnxruntime::logging::Logger& logger) const;
 
         uint32_t GetSupportedDeviceDataTypeMask() const;
 
@@ -207,11 +214,12 @@ namespace Dml
         std::unordered_set<int> m_graphCapturingDone;
         bool m_sessionInitialized = false;
         bool m_cpuSyncSpinningEnabled = false;
+        bool m_memoryArenaDisabled = false;
         ComPtr<ExecutionContext> m_context;
         std::unique_ptr<PooledUploadHeap> m_uploadHeap;
         std::unique_ptr<ReadbackHeap> m_readbackHeap;
         std::shared_ptr<BucketizedBufferAllocator> m_allocator;
-        std::shared_ptr<CPUAllocator> m_cpuInputAllocator;
+        std::shared_ptr<onnxruntime::IAllocator> m_cpuInputAllocator;
         std::shared_ptr<onnxruntime::KernelRegistry> m_kernelRegistry;
         std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap> m_internalRegInfoMap;
         mutable uint64_t m_partitionKernelPrefixVal = 0;
@@ -241,8 +249,8 @@ namespace Dml
 
         bool CanCopy(const OrtDevice& srcDevice, const OrtDevice& dstDevice) const final
         {
-              return (srcDevice.Type() == OrtDevice::GPU) ||
-                     (dstDevice.Type() == OrtDevice::GPU);
+          return ((srcDevice.Type() == OrtDevice::GPU && srcDevice.Vendor() == OrtDevice::VendorIds::MICROSOFT) ||
+                  (dstDevice.Type() == OrtDevice::GPU && dstDevice.Vendor() == OrtDevice::VendorIds::MICROSOFT));
         }
 
     private:
@@ -260,7 +268,8 @@ namespace Dml
             Dml::ExecutionContext* executionContext,
             bool enableMetacommands,
             bool enableGraphCapture,
-            bool enableSyncSpinning
+            bool enableSyncSpinning,
+            bool disableMemoryArena
         );
 
         std::unique_ptr<onnxruntime::IDataTransfer> GetDataTransfer() const final override
@@ -280,7 +289,9 @@ namespace Dml
 
         std::vector<std::unique_ptr<onnxruntime::ComputeCapability>>
             GetCapability(const onnxruntime::GraphViewer& graph,
-                const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup) const final override;
+                const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup,
+                const onnxruntime::GraphOptimizerRegistry& /* graph_optimizer_registry */,
+                onnxruntime::IResourceAccountant* resource_accountant) const final override;
 
         onnxruntime::common::Status OnSessionInitializationEnd() override
         {

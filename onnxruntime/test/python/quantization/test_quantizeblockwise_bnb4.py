@@ -87,7 +87,7 @@ def quantize_blockwise_bnb4_ref(matrix_float: npt.ArrayLike, block_size: int, qu
         absmax[block_idx] = block_absmax
 
         if block_len % 2 != 0:
-            block = np.append(block, 0.0)
+            block = np.append(block, np.float32(0.0))
             block_len += 1
 
         block *= reciprocal_absmax
@@ -113,7 +113,7 @@ def quantize_blockwise_bnb4_target(matrix_float: npt.ArrayLike, block_size: int,
 
     packed = np.zeros(quantized_numel, dtype="uint8")
     absmax = np.zeros(num_blocks, dtype=matrix_float.dtype)
-    from onnxruntime.capi._pybind_state import quantize_matmul_bnb4
+    from onnxruntime.capi._pybind_state import quantize_matmul_bnb4  # noqa: PLC0415
 
     quantize_matmul_bnb4(packed, matrix_float, absmax, block_size, quant_type_enum, n, k)
     return (packed, absmax)
@@ -131,8 +131,8 @@ class TestQuantizeBlockwiseBnb4(unittest.TestCase):
                         matrix_float = np.random.uniform(-1, 1, (k, n)).astype(type)
                         quant_value_ref, absmax_ref = quantize_blockwise_bnb4_ref(matrix_float, block_size, quant_type)
                         quant_value, absmax = quantize_blockwise_bnb4_target(matrix_float, block_size, quant_type)
-                        assert np.allclose(quant_value_ref, quant_value)
-                        assert np.allclose(absmax_ref, absmax)
+                        np.testing.assert_allclose(quant_value_ref, quant_value)
+                        np.testing.assert_allclose(absmax_ref, absmax)
 
 
 if __name__ == "__main__":

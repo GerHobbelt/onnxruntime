@@ -4,13 +4,10 @@
 #include <cassert>
 #include <limits>
 
-#include "core/providers/common.h"
-#include "core/providers/shared/utils/utils.h"
+#include "core/providers/qnn/builder/opbuilder/base_op_builder.h"
 #include "core/providers/qnn/builder/qnn_model_wrapper.h"
 #include "core/providers/qnn/builder/op_builder_factory.h"
 #include "core/providers/qnn/builder/qnn_utils.h"
-
-#include "base_op_builder.h"
 
 namespace onnxruntime {
 namespace qnn {
@@ -43,15 +40,51 @@ static Status ProcessClipMinMax(QnnModelWrapper& qnn_model_wrapper,
   std::vector<uint8_t> val_bytes;
   ORT_RETURN_IF_ERROR(qnn_model_wrapper.GetTensorInfo(input, input_info));
   assert(input_info.is_initializer);  // Checked by ExplicitOpCheck().
-  if (QNN_DATATYPE_FLOAT_16 == input_info.qnn_data_type) {
-    ORT_RETURN_IF_ERROR(qnn_model_wrapper.UnpackInitializerData(*input_info.initializer_tensor, val_bytes));
-    MLFloat16 fp16_value = *reinterpret_cast<const MLFloat16*>(val_bytes.data());
-    float_value = fp16_value.ToFloat();
-  } else {
-    ORT_RETURN_IF_NOT(QNN_DATATYPE_FLOAT_32 == input_info.qnn_data_type,
-                      "QNN EP: The 'min' input of the Clip operator must be of type float32.");
-    ORT_RETURN_IF_ERROR(qnn_model_wrapper.UnpackInitializerData(*input_info.initializer_tensor, val_bytes));
-    float_value = *reinterpret_cast<const float*>(val_bytes.data());
+  ORT_RETURN_IF_ERROR(qnn_model_wrapper.UnpackInitializerData(*input_info.initializer_tensor, val_bytes));
+  switch (input_info.qnn_data_type) {
+    case QNN_DATATYPE_INT_8: {
+      float_value = static_cast<float>(*reinterpret_cast<int8_t*>(val_bytes.data()));
+      break;
+    }
+    case QNN_DATATYPE_INT_16: {
+      float_value = static_cast<float>(*reinterpret_cast<int16_t*>(val_bytes.data()));
+      break;
+    }
+    case QNN_DATATYPE_INT_32: {
+      float_value = static_cast<float>(*reinterpret_cast<int32_t*>(val_bytes.data()));
+      break;
+    }
+    case QNN_DATATYPE_INT_64: {
+      float_value = static_cast<float>(*reinterpret_cast<int64_t*>(val_bytes.data()));
+      break;
+    }
+    case QNN_DATATYPE_UINT_8: {
+      float_value = static_cast<float>(*val_bytes.data());
+      break;
+    }
+    case QNN_DATATYPE_UINT_16: {
+      float_value = static_cast<float>(*reinterpret_cast<uint16_t*>(val_bytes.data()));
+      break;
+    }
+    case QNN_DATATYPE_UINT_32: {
+      float_value = static_cast<float>(*reinterpret_cast<uint32_t*>(val_bytes.data()));
+      break;
+    }
+    case QNN_DATATYPE_UINT_64: {
+      float_value = static_cast<float>(*reinterpret_cast<uint64_t*>(val_bytes.data()));
+      break;
+    }
+    case QNN_DATATYPE_FLOAT_16: {
+      MLFloat16 fp16_value = *reinterpret_cast<const MLFloat16*>(val_bytes.data());
+      float_value = fp16_value.ToFloat();
+      break;
+    }
+    case QNN_DATATYPE_FLOAT_32: {
+      float_value = *reinterpret_cast<const float*>(val_bytes.data());
+      break;
+    }
+    default:
+      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "min/max input data type not supported.");
   }
 
   return Status::OK();
@@ -60,14 +93,14 @@ static Status ProcessClipMinMax(QnnModelWrapper& qnn_model_wrapper,
 Status ClipOpBuilder::ExplictOpCheck(QnnModelWrapper& qnn_model_wrapper, const NodeUnit& node_unit) const {
   if (node_unit.Inputs().size() > 1) {
     const auto& min_input_name = node_unit.Inputs()[1].node_arg.Name();
-    if (!min_input_name.empty() && !qnn_model_wrapper.IsInitializerInput(min_input_name)) {
-      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "QNN desn't support dynamic min/max.");
+    if (!min_input_name.empty() && !qnn_model_wrapper.IsConstantInput(min_input_name)) {
+      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "QNN doesn't support dynamic min/max.");
     }
   }
   if (node_unit.Inputs().size() > 2) {
     const auto& max_input_name = node_unit.Inputs()[2].node_arg.Name();
-    if (!max_input_name.empty() && !qnn_model_wrapper.IsInitializerInput(max_input_name)) {
-      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "QNN desn't support dynamic min/max.");
+    if (!max_input_name.empty() && !qnn_model_wrapper.IsConstantInput(max_input_name)) {
+      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "QNN doesn't support dynamic min/max.");
     }
   }
   return Status::OK();

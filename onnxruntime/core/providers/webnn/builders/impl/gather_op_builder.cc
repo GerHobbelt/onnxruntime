@@ -20,8 +20,8 @@ class GatherOpBuilder : public BaseOpBuilder {
                                const logging::Logger& logger) const override ORT_MUST_USE_RESULT;
 
   // Operator support related.
-  bool IsOpSupportedImpl(const InitializedTensorSet& /* initializers */, const Node& node,
-                         const WebnnDeviceType /* device_type */, const logging::Logger& logger) const override;
+  bool HasSupportedInputsImpl(const GraphViewer&, const Node& node,
+                              const emscripten::val& wnn_limits, const logging::Logger& logger) const override;
 };
 
 // Add operator related.
@@ -40,6 +40,7 @@ Status GatherOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   emscripten::val indices = model_builder.GetOperand(input_defs[1]->Name());
   emscripten::val options = emscripten::val::object();
   options.set("axis", axis);
+  options.set("label", node.Name());
   emscripten::val output = model_builder.GetBuilder().call<emscripten::val>("gather", input, indices, options);
 
   model_builder.AddOperand(node.OutputDefs()[0]->Name(), std::move(output));
@@ -47,23 +48,20 @@ Status GatherOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
 }
 
 // Operator support related.
+bool GatherOpBuilder::HasSupportedInputsImpl(const GraphViewer&, const Node& node,
+                                             const emscripten::val& wnn_limits, const logging::Logger& logger) const {
+  const auto& input = *node.InputDefs()[0];
+  const auto& indices = *node.InputDefs()[1];
+  const std::string_view op_type = node.OpType();
+  int32_t input_type, indices_type;
 
-bool GatherOpBuilder::IsOpSupportedImpl(const InitializedTensorSet& /* initializers */,
-                                        const Node& node,
-                                        const WebnnDeviceType /* device_type */,
-                                        const logging::Logger& logger) const {
-  const auto& input_defs = node.InputDefs();
-  std::vector<int64_t> input_shape;
-  if (!GetShape(*input_defs[0], input_shape, logger))
+  if (!GetType(input, input_type, logger) ||
+      !GetType(indices, indices_type, logger))
     return false;
-  const auto rank = input_shape.size();
-  if (rank < 1) {
-    LOGS(logger, VERBOSE) << "Gather only supports input shapes >= 1D, but input is "
-                          << rank << "d shape";
-    return false;
-  }
 
-  return true;
+  return IsDataTypeSupportedByOp(op_type, input_type, wnn_limits, "input", "data", logger) &&
+         IsDataTypeSupportedByOp(op_type, indices_type, wnn_limits, "indices", "indices", logger) &&
+         IsInputRankSupportedByOp(node, wnn_limits, logger);
 }
 
 void CreateGatherOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations) {

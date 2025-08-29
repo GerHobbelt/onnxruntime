@@ -39,7 +39,13 @@ __global__ void MaskIndexKernelSmall(int sequence_length, const int* mask, int* 
   // blockIdx.x is b
   const int offset = blockIdx.x * sequence_length;  // batch strides of sequence_length
 
+#if CUDA_VERSION >= 12090
+  ::cuda::minimum<int> min;
+#else
+  // Deprecated on CUDA 12.9
   cub::Min min;
+#endif
+
   int thread_data(sequence_length);
 
   const int idx = offset + threadIdx.x;
@@ -66,7 +72,13 @@ __global__ void MaskIndexKernel(int sequence_length, const int* mask, int* mask_
   // blockIdx.x is b
   const int offset = blockIdx.x * sequence_length;  // batch strides of sequence_length
 
+#if CUDA_VERSION >= 12090
+  ::cuda::minimum<int> min;
+#else
+  // Deprecated on CUDA 12.9
   cub::Min min;
+#endif
+
   int thread_data(sequence_length);
 
   for (int i = threadIdx.x; i < sequence_length; i += TPB) {
@@ -141,7 +153,7 @@ __global__ void EmbedLayerNormKernel(
   }
   __syncthreads();
 
-  // 2. load pos/segment/word embeddings and add them toghether
+  // 2. load pos/segment/word embeddings and add them together
   // offset into embeddings is given by word_id * hidden_size
   const int position_offset = position_id * hidden_size;
 

@@ -10,6 +10,13 @@
 namespace onnxruntime {
 namespace test {
 
+template <typename T>
+class ResizeOpTest : public ::testing::Test {
+};
+
+using ResizeOpTestTypes = ::testing::Types<float, MLFloat16>;
+TYPED_TEST_SUITE(ResizeOpTest, ResizeOpTestTypes);
+
 TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_tf_crop_and_resize) {
   // TODO: Unskip when fixed #41968513
   if (DefaultDmlExecutionProvider().get() != nullptr) {
@@ -100,11 +107,11 @@ TEST(ResizeOpTest, NhwcResizeOpLinearDownSampleTest_tf_crop_and_resize_with_extr
                           10.0f, 10.0f, 10.0f};
 
   test.AddOutput<float>("Y", {N, static_cast<int64_t>(H * scales[1]), static_cast<int64_t>(W * scales[2]), C}, Y);
-  // CUDA: result mismatch due to not implementing NHWC support
+  // CUDA | WEBGPU: result mismatch due to not implementing NHWC support
   // TensorRT: results mismatch
   // ROCm: results mismatch
   test.Run(OpTester::ExpectResult::kExpectSuccess, "",
-           {kCudaExecutionProvider, kCudaNHWCExecutionProvider, kTensorrtExecutionProvider, kRocmExecutionProvider});
+           {kCudaExecutionProvider, kCudaNHWCExecutionProvider, kTensorrtExecutionProvider, kRocmExecutionProvider, kWebGpuExecutionProvider});
 }
 
 TEST(ResizeOpTest, NhwcResizeOpLinearDownSampleTest_tf_crop_and_resize_with_extrapolation_uint8) {
@@ -226,29 +233,34 @@ TEST(ResizeOpTest, NhwcResizeOpLinearDownSampleTest_tf_crop_and_resize_without_e
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kDmlExecutionProvider});
 }
 
-TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear) {
-  OpTester test("Resize", 13);
-  std::vector<float> roi{};
-  std::vector<float> scales{1.0f, 1.0f, 0.6f, 0.6f};
+TYPED_TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear) {
+  auto run_test = [](bool scales_in_initializer) {
+    OpTester test("Resize", 13);
+    std::vector<TypeParam> roi{};
+    std::vector<float> scales{1.0f, 1.0f, 0.6f, 0.6f};
 
-  test.AddAttribute("mode", "linear");
+    test.AddAttribute("mode", "linear");
 
-  constexpr int64_t N = 1, C = 1, H = 2, W = 4;
-  std::vector<float> X = {
-      1.0f, 2.0f, 3.0f, 4.0f,
-      5.0f, 6.0f, 7.0f, 8.0f};
+    constexpr int64_t N = 1, C = 1, H = 2, W = 4;
+    std::vector<TypeParam> X = {
+        TypeParam(1.0f), TypeParam(2.0f), TypeParam(3.0f), TypeParam(4.0f),
+        TypeParam(5.0f), TypeParam(6.0f), TypeParam(7.0f), TypeParam(8.0f)};
 
-  test.AddInput<float>("X", {N, C, H, W}, X);
-  test.AddInput<float>("roi", {0}, roi);
-  test.AddInput<float>("scales", {4}, scales);
+    test.AddInput<TypeParam>("X", {N, C, H, W}, X);
+    test.AddInput<TypeParam>("roi", {0}, roi);
+    test.AddInput<float>("scales", {4}, scales, scales_in_initializer);
 
-  std::vector<float> Y = {2.66666651f, 4.3333331f};
+    std::vector<TypeParam> Y = {TypeParam(2.66666651f), TypeParam(4.3333331f)};
 
-  test.AddOutput<float>("Y", {N, C, static_cast<int64_t>(H * scales[2]), static_cast<int64_t>(W * scales[3])}, Y);
-  // QNN: result diff
-  // TRT: Segmentation fault in A100
-  std::unordered_set<std::string> excluded_providers({kQnnExecutionProvider});
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", ExcludeTrtOnA100(excluded_providers));
+    test.AddOutput<TypeParam>("Y", {N, C, static_cast<int64_t>(H * scales[2]), static_cast<int64_t>(W * scales[3])}, Y);
+    // QNN: result diff
+    // TRT: Segmentation fault in A100
+    std::unordered_set<std::string> excluded_providers({kQnnExecutionProvider});
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", ExcludeTrtOnA100(excluded_providers));
+  };
+
+  run_test(false);
+  run_test(true);
 }
 
 TEST(ResizeOpTest, NhwcResizeOpLinearDownSampleTest_4DBilinear) {
@@ -270,10 +282,10 @@ TEST(ResizeOpTest, NhwcResizeOpLinearDownSampleTest_4DBilinear) {
   std::vector<float> Y = {2.66666651f, 4.3333331f};
 
   test.AddOutput<float>("Y", {N, static_cast<int64_t>(H * scales[1]), static_cast<int64_t>(W * scales[2]), C}, Y);
-  // CUDA: result mismatch due to not implementing NHWC support
+  // CUDA | WEBGPU: result mismatch due to not implementing NHWC support
   // ROCm: results mismatch
   // TRT: Segmentation fault in A100
-  std::unordered_set<std::string> excluded_providers({kCudaExecutionProvider, kCudaNHWCExecutionProvider, kRocmExecutionProvider});
+  std::unordered_set<std::string> excluded_providers({kCudaExecutionProvider, kCudaNHWCExecutionProvider, kRocmExecutionProvider, kWebGpuExecutionProvider});
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", ExcludeTrtOnA100(excluded_providers));
 }
 
@@ -327,13 +339,14 @@ TEST(ResizeOpTest, NhwcResizeOpLinearDownSampleTest_4DBilinear_int8) {
 // Since NNAPI(TFLite) only using the scale calculate using the input/output size
 // For the above test (ResizeOpLinearDownSampleTest_4DBilinear)
 // The output size is [1,1,2,4].*[1,1,0.6,0.6]=[1,1,1,2]
-// NNAPI will recaluclate the scales as the output size divided by input size
+// NNAPI will recalculate the scales as the output size divided by input size
 // scales = [1,1,1,2]./[1,1,2,4] = [1,1,0.5,0.5]
 // See:https://github.com/tensorflow/tensorflow/blob/master/tensorflow/lite/kernels/internal/reference/reference_ops.h
 // So the result of the above example will be different than CPU EP
-// Add the following 2 tests to test with scales valid to NNAPI
+// Add the following 2 tests to test with scales valid to NNAPI.
+// CoreML also doesn't handle a scale that doesn't divide the input size evenly.
 TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear1) {
-  // To test NNAPI EP, we need the sclaes/sizes to be in initializers
+  // To test NNAPI EP, we need the scales/sizes to be in initializers
   auto run_test = [](bool scales_in_initializer) {
     OpTester test("Resize", 13);
     std::vector<float> roi{};
@@ -360,8 +373,38 @@ TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear1) {
   run_test(true);
 }
 
+// Downsize with factor being an odd number (1/3)
+TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear1_OddNumber) {
+  // To test NNAPI EP, we need the scales/sizes to be in initializers
+  auto run_test = [](bool scales_in_initializer) {
+    OpTester test("Resize", 13);
+    std::vector<float> roi{};
+    std::vector<float> scales{1.0f, 1.0f, (1.f / 3), (1.f / 3)};
+
+    test.AddAttribute("mode", "linear");
+
+    constexpr int64_t N = 1, C = 1, H = 3, W = 6;
+    std::vector<float> X = {
+        1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f,
+        13.0f, 14.0f, 15.0f, 16.0f, 17.0f, 18.0f};
+
+    test.AddInput<float>("X", {N, C, H, W}, X);
+    test.AddInput<float>("roi", {0}, roi);
+    test.AddInput<float>("scales", {4}, scales, scales_in_initializer);
+
+    std::vector<float> Y = {8.f, 11.f};
+
+    test.AddOutput<float>("Y", {N, C, static_cast<int64_t>(H * scales[2]), static_cast<int64_t>(W * scales[3])}, Y);
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", ExcludeTrtOnA100());
+  };
+
+  run_test(false);
+  run_test(true);
+}
+
 TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear1_WithSizes) {
-  // To test NNAPI EP, we need the sclaes/sizes to be in initializers
+  // To test NNAPI EP, we need the scales/sizes to be in initializers
   auto run_test = [](bool scales_and_sizes_in_initializer) {
     OpTester test("Resize", 13);
     std::vector<float> roi{};
@@ -389,8 +432,32 @@ TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear1_WithSizes) {
   run_test(true);
 }
 
+// test handling for opset 11. scales input is provided but should be ignored in favor of sizes
+TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear1_WithSizesOpset11) {
+  OpTester test("Resize", 11);
+  std::vector<float> roi{};
+  std::vector<float> scales{};
+  constexpr int64_t N = 1, C = 1, H = 2, W = 4;
+  std::vector<int64_t> sizes{N, C, 1, 2};
+  test.AddAttribute("mode", "linear");
+
+  std::vector<float> X = {
+      1.0f, 2.0f, 3.0f, 4.0f,
+      5.0f, 6.0f, 7.0f, 8.0f};
+
+  test.AddInput<float>("X", {N, C, H, W}, X);
+  test.AddInput<float>("roi", {0}, roi);
+  test.AddInput<float>("scales", {0}, scales);
+  test.AddInput<int64_t>("sizes", {4}, sizes, true);  // add as initializer so CoreML EP can take
+
+  std::vector<float> Y = {3.5f, 5.5f};
+
+  test.AddOutput<float>("Y", sizes, Y);
+  test.Run();
+}
+
 TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear_align_corners) {
-  // To test NNAPI EP, we need the sclaes/sizes to be in initializers
+  // To test NNAPI EP, we need the scales/sizes to be in initializers
   auto run_test = [](bool scales_in_initializer) {
     OpTester test("Resize", 13);
     std::vector<float> roi{};
@@ -416,15 +483,51 @@ TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear_align_corners) {
 
   run_test(false);
 
-#ifdef USE_NNAPI
-  // NNAPI will need the scales as an initializer
+#if defined(USE_NNAPI) || defined(USE_COREML)
+  // NNAPI and CoreML need the scales as an initializer
+  // Also tensor RT EP will fail if scales is an initializer but will pass if it is not
+  run_test(true);
+#endif
+}
+
+TEST(ResizeOpTest, ResizeOpLinearDownSampleTest_4DBilinear_align_corners_sizes) {
+  // To test NNAPI EP, we need the scales/sizes to be in initializers
+  auto run_test = [](bool scales_in_initializer) {
+    OpTester test("Resize", 13);
+    std::vector<float> roi{};
+    std::vector<float> scales{};
+    std::vector<int64_t> sizes{1, 1, 1, 2};
+
+    test.AddAttribute("mode", "linear");
+    test.AddAttribute("coordinate_transformation_mode", "align_corners");
+
+    constexpr int64_t N = 1, C = 1, H = 2, W = 4;
+    std::vector<float> X = {
+        1.0f, 2.0f, 3.0f, 4.0f,
+        5.0f, 6.0f, 7.0f, 8.0f};
+
+    test.AddInput<float>("X", {N, C, H, W}, X);
+    test.AddInput<float>("roi", {0}, roi);
+    test.AddInput<float>("", {0}, scales);
+    test.AddInput<int64_t>("sizes", {4}, sizes, scales_in_initializer);
+
+    std::vector<float> Y = {1.0f, 4.0f};
+
+    test.AddOutput<float>("Y", {N, C, 1, 2}, Y);
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", ExcludeTrtOnA100());
+  };
+
+  run_test(false);
+
+#if defined(USE_NNAPI) || defined(USE_COREML)
+  // NNAPI and CoreML will need the scales as an initializer
   // Also tensor RT EP will fail if scales is an initializer but will pass if it is not
   run_test(true);
 #endif
 }
 
 TEST(ResizeOpTest, NhwcResizeOpLinearDownSampleTest_4DBilinear_align_corners_uint8) {
-  // To test NNAPI EP, we need the sclaes/sizes to be in initializers
+  // To test NNAPI EP, we need the scales/sizes to be in initializers
   auto run_test = [](bool scales_in_initializer) {
     OpTester test("Resize", 13);
     std::vector<float> roi{};
@@ -456,7 +559,7 @@ TEST(ResizeOpTest, NhwcResizeOpLinearDownSampleTest_4DBilinear_align_corners_uin
 }
 
 TEST(ResizeOpTest, NhwcResizeOpLinearDownSampleTest_4DBilinear_align_corners_int8) {
-  // To test NNAPI EP, we need the sclaes/sizes to be in initializers
+  // To test NNAPI EP, we need the scales/sizes to be in initializers
   auto run_test = [](bool scales_in_initializer) {
     OpTester test("Resize", 13);
     std::vector<float> roi{};
@@ -622,7 +725,7 @@ TEST(ResizeOpTest, ResizeOpLinearUpSampleTest_4DBilinear_asymmetric_scales) {
 }
 
 TEST(ResizeOpTest, NhwcResizeOpLinearUpSampleTest_4DBilinear_asymmetric_uint8) {
-  // To test NNAPI EP, we need the sclaes/sizes to be in initializers
+  // To test NNAPI EP, we need the scales/sizes to be in initializers
   auto run_test = [](bool scales_in_initializer) {
     OpTester test("Resize", 13);
     std::vector<float> roi{};
@@ -668,7 +771,7 @@ TEST(ResizeOpTest, NhwcResizeOpLinearUpSampleTest_4DBilinear_asymmetric_uint8) {
 }
 
 TEST(ResizeOpTest, NhwcResizeOpLinearUpSampleTest_4DBilinear_asymmetric_int8) {
-  // To test NNAPI EP, we need the sclaes/sizes to be in initializers
+  // To test NNAPI EP, we need the scales/sizes to be in initializers
   auto run_test = [](bool scales_in_initializer) {
     OpTester test("Resize", 13);
     std::vector<float> roi{};
@@ -1269,6 +1372,110 @@ TEST(ResizeOpTest, ResizeOpCubicDownSampleTest) {
 
   test.AddOutput<float>("Y", {N, C, static_cast<int64_t>(H * scales[2]), static_cast<int64_t>(W * scales[3])}, Y);
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", ExcludeTrtOnA100());
+}
+
+TEST(ResizeOpTest, ResizeOpCubicDownSampleTest_antialias_large_custom_coeff) {
+  OpTester test("Resize", 18);
+  std::vector<float> scales{};
+  std::vector<float> roi{};
+  std::vector<int64_t> sizes{1, 1, 16, 16};
+
+  test.AddAttribute("mode", "cubic");
+  test.AddAttribute<int64_t>("antialias", 1);
+  test.AddAttribute("cubic_coeff_a", -0.5f);
+
+  constexpr int64_t N = 1, C = 1, H = 64, W = 64;
+  std::vector<uint8_t> X = {
+      180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
+      0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180,
+      0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0,
+      0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0,
+      0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0,
+      0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 180, 180, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0, 0,
+      0, 0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0, 0,
+      0, 0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0, 0,
+      0, 0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0,
+      0, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80};
+
+  test.AddInput<uint8_t>("X", {N, C, H, W}, X);
+  test.AddInput<float>("roi", {0}, roi);
+  test.AddInput<float>("", {0}, scales);
+  test.AddInput<int64_t>("sizes", {4}, sizes);
+
+  std::vector<uint8_t> Y = {
+      110, 187, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 187, 143,
+      2, 108, 188, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 187, 142, 16,
+      0, 2, 108, 188, 180, 180, 180, 180, 180, 180, 180, 180, 187, 142, 16, 0,
+      0, 0, 2, 108, 188, 180, 180, 180, 180, 180, 180, 187, 142, 16, 0, 0,
+      0, 0, 0, 2, 108, 188, 180, 180, 180, 180, 187, 142, 16, 0, 0, 0,
+      0, 0, 0, 0, 2, 108, 188, 180, 180, 187, 142, 16, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 2, 108, 188, 188, 142, 16, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 2, 109, 140, 16, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 34, 53, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 32, 80, 83, 48, 1, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 32, 81, 81, 80, 83, 48, 1, 0, 0, 0, 0,
+      0, 0, 0, 0, 32, 81, 81, 80, 80, 80, 83, 48, 1, 0, 0, 0,
+      0, 0, 0, 32, 81, 81, 80, 80, 80, 80, 80, 83, 48, 1, 0, 0,
+      0, 0, 32, 81, 81, 80, 80, 80, 80, 80, 80, 80, 83, 48, 1, 0,
+      0, 32, 81, 81, 80, 80, 80, 80, 80, 80, 80, 80, 80, 83, 48, 1,
+      31, 81, 81, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 83, 49};
+
+  test.AddOutput<uint8_t>("Y", sizes, Y);
+  test.Run();
 }
 
 TEST(ResizeOpTest, ResizeOpCubicDownSampleTest_exclude_outside) {
@@ -1902,6 +2109,8 @@ void TestAntialiasing(std::map<std::string, std::string> attributes,
       roi = parse_attr(v, 0.0f);
     } else if (k == "antialias") {
       test.AddAttribute<int64_t>("antialias", std::stoll(v));
+    } else if (k == "nearest_mode") {
+      test.AddAttribute("nearest_mode", v);
     } else {
       throw std::invalid_argument("Unknown attribute");
     }
@@ -1931,6 +2140,8 @@ void TestAntialiasing(std::map<std::string, std::string> attributes,
   excluded_eps.insert(kTensorrtExecutionProvider);
   // Test is flaky on kCudaNHWCExecutionProvider
   excluded_eps.insert(kCudaNHWCExecutionProvider);
+  // Not implementing Antialias support on kWebGpuExecutionProvider
+  excluded_eps.insert(kWebGpuExecutionProvider);
 
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", excluded_eps);
 }
@@ -2182,6 +2393,111 @@ TEST(ResizeOpTest, Antialias_NHWCBicubic_ExcludeOutside) {
   TestAntialiasing({{"mode", "cubic"}, {"exclude_outside", "0"}}, {1, 4, 6, 2}, X, {1, 8, 4, 2}, Y, excluded_eps);
 }
 
+TEST(ResizeOpTest, NoAntialias_AlignCorners_Cubic_Floor_NCHW) {
+  std::vector<float> X(24);
+  std::iota(X.begin(), X.end(), 1.0f);
+  // clang-format off
+  std::vector<float> Y = {
+       1.0f, 1.34111f, 1.80029f, 2.32945f, 2.67055f, 3.19971f, 3.65889f,     4.0f,
+     2.264f, 2.60511f, 3.06429f, 3.59345f, 3.93455f, 4.46371f, 4.92289f,   5.264f,
+     3.912f, 4.25311f, 4.71229f, 5.24145f, 5.58256f, 6.11171f,  6.5709f,   6.912f,
+     6.088f, 6.42911f, 6.88829f, 7.41745f, 7.75856f, 8.28771f,  8.7469f, 9.08801f,
+     7.736f, 8.07711f, 8.53629f, 9.06545f, 9.40655f, 9.93571f, 10.3949f,  10.736f,
+       9.0f, 9.34111f, 9.80029f, 10.3295f, 10.6706f, 11.1997f, 11.6589f,    12.0f,
+
+      13.0f, 13.3411f, 13.8003f, 14.3295f, 14.6706f, 15.1997f, 15.6589f,    16.0f,
+    14.264f, 14.6051f, 15.0643f, 15.5934f, 15.9346f, 16.4637f, 16.9229f,  17.264f,
+    15.912f, 16.2531f, 16.7123f, 17.2415f, 17.5826f, 18.1117f, 18.5709f,  18.912f,
+    18.088f, 18.4291f, 18.8883f, 19.4175f, 19.7586f, 20.2877f, 20.7469f,  21.088f,
+    19.736f, 20.0771f, 20.5363f, 21.0654f, 21.4066f, 21.9357f, 22.3949f,  22.736f,
+      21.0f, 21.3411f, 21.8003f, 22.3295f, 22.6706f, 23.1997f, 23.6589f,    24.0f,
+  };
+  // clang-format on
+  TestAntialiasing(
+      {{"antialias", "0"},
+       {"coordinate_transformation_mode", "align_corners"},
+       {"cubic_coeff_a", "-0.75"},
+       {"exclude_outside", "0"},
+       {"extrapolation_value", "0"},
+       {"mode", "cubic"},
+       {"nearest_mode", "floor"}},
+      {1, 2, 3, 4}, X, {1, 2, 6, 8}, Y);
+}
+
+// This test is generated by onnxruntime/test/providers/cpu/tensor/resize_sample_test_gen.py
+TEST(ResizeOpTest, NoAntialias_AlignCorners_Cubic_Floor_NHWC) {
+  std::vector<float> X(24);
+  std::iota(X.begin(), X.end(), 1.0f);
+  // clang-format off
+  std::vector<float> Y = {
+     1.0000f,  2.0000f,
+     1.6822f,  2.6822f,
+     2.6006f,  3.6006f,
+     3.6589f,  4.6589f,
+     4.3411f,  5.3411f,
+     5.3994f,  6.3994f,
+     6.3178f,  7.3178f,
+     7.0000f,  8.0000f,
+
+     3.5280f,  4.5280f,
+     4.2102f,  5.2102f,
+     5.1286f,  6.1286f,
+     6.1869f,  7.1869f,
+     6.8691f,  7.8691f,
+     7.9274f,  8.9274f,
+     8.8458f,  9.8458f,
+     9.5280f, 10.5280f,
+
+     6.8240f,  7.8240f,
+     7.5062f,  8.5062f,
+     8.4246f,  9.4246f,
+     9.4829f, 10.4829f,
+    10.1651f, 11.1651f,
+    11.2234f, 12.2234f,
+    12.1418f, 13.1418f,
+    12.8240f, 13.8240f,
+
+    11.1760f, 12.1760f,
+    11.8582f, 12.8582f,
+    12.7766f, 13.7766f,
+    13.8349f, 14.8349f,
+    14.5171f, 15.5171f,
+    15.5754f, 16.5754f,
+    16.4938f, 17.4938f,
+    17.1760f, 18.1760f,
+
+    14.4720f, 15.4720f,
+    15.1542f, 16.1542f,
+    16.0726f, 17.0726f,
+    17.1309f, 18.1309f,
+    17.8131f, 18.8131f,
+    18.8714f, 19.8714f,
+    19.7898f, 20.7898f,
+    20.4720f, 21.4720f,
+
+    17.0000f, 18.0000f,
+    17.6822f, 18.6822f,
+    18.6006f, 19.6006f,
+    19.6589f, 20.6589f,
+    20.3411f, 21.3411f,
+    21.3994f, 22.3994f,
+    22.3178f, 23.3178f,
+    23.0000f, 24.0000f,
+  };
+  // clang-format on
+  InlinedVector<std::string_view> excluded_eps = {kCudaExecutionProvider, kRocmExecutionProvider};
+  TestAntialiasing(
+      {{"antialias", "0"},
+       {"coordinate_transformation_mode", "align_corners"},
+       {"cubic_coeff_a", "-0.75"},
+       {"exclude_outside", "0"},
+       {"extrapolation_value", "0"},
+       {"mode", "cubic"},
+       {"nearest_mode", "floor"}},
+      // FIXME: Fix error on kCudaExecutionProvider
+      {1, 3, 4, 2}, X, {1, 6, 8, 2}, Y, excluded_eps);
+}
+
 TEST(ResizeOpTest, Antialias_Linear_AlignCorners) {
   if (DefaultDmlExecutionProvider().get() != nullptr) {
     GTEST_SKIP() << "Skipping because dml implementation of antialias"
@@ -2370,7 +2686,7 @@ TEST(ResizeOpTest, Antialias_Large_half_pixel) {
   // DML implementation is equivalent to resize with variable input window size while ORT using a convolution approach.
   // Absolute error is for ORT CPU.
   test.AddOutput<float>("Y", output_shape, Y, false, /*rel_error*/ 0.0f, /*abs_error*/ 0.12f);
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kQnnExecutionProvider});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kQnnExecutionProvider, kWebGpuExecutionProvider});
 }
 
 // Test without anti-aliasing for better comparison with DirectML

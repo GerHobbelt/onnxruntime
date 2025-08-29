@@ -6,6 +6,8 @@
 #include "core/common/logging/logging.h"
 #include "core/common/span_utils.h"
 #include "core/framework/utils.h"
+#include "core/session/allocator_adapters.h"
+#include "core/session/environment.h"
 #include "core/session/inference_session.h"
 #include "core/session/onnxruntime_cxx_api.h"
 #include "core/session/onnxruntime_session_options_config_keys.h"
@@ -159,7 +161,7 @@ TEST(InternalTestingEP, PreventSaveOfModelWithCompiledOps) {
 
 // the internal NHWC operators are only included as part of contrib ops currently. as the EP requests the NHWC
 // version of the ONNX operator when matching a static kernel, those are required.
-#if !defined(DISABLE_CONTRIB_OPS)
+#if !defined(DISABLE_CONTRIB_OPS) && !defined(USE_ROCM)
 TEST(InternalTestingEP, TestMixOfStaticAndCompiledKernels) {
   const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "transform/fusion/conv_relu_opset12.onnx";
 
@@ -196,7 +198,7 @@ TEST(InternalTestingEP, TestMixOfStaticAndCompiledKernels) {
 
   // Error message should come from the Conv implementation with the statically registered kernel
   ASSERT_STATUS_NOT_OK_AND_HAS_SUBSTR(session.Run(feeds, output_names, &fetches),
-                                      "Non-zero status code returned while running Conv node. Name:'Conv' "
+                                      "Non-zero status code returned while running Conv node. Name:'_token_2' "
                                       "Status Message: TODO: add NHWC implementation here.");
 }
 
@@ -242,7 +244,7 @@ TEST(InternalTestingEP, TestNhwcConversionOfStaticKernels) {
     std::vector<OrtValue> fetches;
 
     ASSERT_STATUS_NOT_OK_AND_HAS_SUBSTR(session.Run(feeds, output_names, &fetches),
-                                        "Non-zero status code returned while running Conv node. Name:'Conv' "
+                                        "Non-zero status code returned while running Conv node. Name:'_token_2' "
                                         "Status Message: TODO: add NHWC implementation here.");
   };
 
@@ -256,18 +258,15 @@ TEST(InternalTestingEP, TestNhwcConversionOfStaticKernels) {
   run_test(ort_model_path);
 }
 
-// This test can be deprecated now as the code logic has been changed so the model is not applicable
-// TEST(InternalTestingEP, TestRegisterAllocatorHandlesUsageInMultipleSessions) {
-//}
-
 // make sure allocators returned by SessionState::GetAllocator are valid when IExecutionProvider::ReplaceAllocator
 // is used. if something is off InferenceSession::Initialize will fail.
 TEST(InternalTestingEP, TestReplaceAllocatorDoesntBreakDueToLocalAllocatorStorage) {
   OrtMemoryInfo mem_info("Replacement", OrtAllocatorType::OrtDeviceAllocator);
   AllocatorPtr replacement_alloc = std::make_shared<CPUAllocator>(mem_info);
   OrtEnv& env = *(OrtEnv*)(*ort_env);
+  OrtAllocatorImplWrappingIAllocator ort_allocator(std::move(replacement_alloc));
 
-  ASSERT_STATUS_OK(env.RegisterAllocator(replacement_alloc));
+  ASSERT_STATUS_OK(env.GetEnvironment().RegisterAllocator(&ort_allocator));
 
   SessionOptions so;
   ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsConfigUseEnvAllocators, "1"));
@@ -288,7 +287,13 @@ TEST(InternalTestingEP, TestReplaceAllocatorDoesntBreakDueToLocalAllocatorStorag
   ASSERT_STATUS_OK(session.Load(ort_model_path));
   ASSERT_STATUS_OK(session.Initialize());
 
-  ASSERT_EQ(replacement_alloc, session.GetAllocator(OrtMemoryInfo())) << "Allocators registered from Env should have the highest priority";
+  // Need to undo the wrapping that happens in Environment::RegisterAllocator to be able to compare the pointers
+  const OrtAllocator* session_allocator = reinterpret_cast<IAllocatorImplWrappingOrtAllocator*>(
+                                              session.GetAllocator(mem_info).get())
+                                              ->GetWrappedOrtAllocator();
+
+  ASSERT_EQ(session_allocator, &ort_allocator)
+      << "Allocators registered from Env should have the highest priority";
 }
 
 #endif  // !defined(DISABLE_CONTRIB_OPS)

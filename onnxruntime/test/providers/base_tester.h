@@ -7,6 +7,7 @@
 #include <string>
 #include <variant>
 #include <vector>
+#include <type_traits>
 
 #include "core/framework/customregistry.h"
 #include "core/framework/prepacked_weights_container.h"
@@ -38,6 +39,7 @@ class BaseTester {
           ONNX_NAMESPACE::OpSchemaRegistry::DomainToVersionRange().Map().at(ONNX_NAMESPACE::ONNX_DOMAIN).second;
       opset_version_ = latest_onnx_version;
     }
+    number_of_nodes_ = 0;
   }
 
   // Derived class to implement to provide the model to test.
@@ -620,6 +622,8 @@ class BaseTester {
     test_allow_released_onnx_opset_only_ = false;
   }
 
+  int GetNumberOfNodesAfterRun() const;
+
  protected:
   //// if the derived class is caching the model this helper can be called in CreateModelToTest to reset the nodes
   // static void ClearEpsForAllNodes(Graph& graph);
@@ -690,8 +694,14 @@ class BaseTester {
       if (!is_optional_type_tensor || (is_optional_type_tensor && values != nullptr)) {
         // In case values is nullptr for optional type tensor, it means we are creating
         // an optional type tensor which is None and we hence skip values count validation
-        ORT_ENFORCE(shape.Size() == values_count, values_count, " input values doesn't match tensor size of ",
-                    shape.Size());
+        if constexpr (std::is_same_v<T, Int4x2> || std::is_same_v<T, UInt4x2>) {
+          const int64_t expected_values_count = T::CalcNumInt4Pairs(shape.Size());
+          ORT_ENFORCE(expected_values_count == values_count, values_count,
+                      " input values doesn't match tensor size of ", expected_values_count);
+        } else {
+          ORT_ENFORCE(shape.Size() == values_count, values_count, " input values doesn't match tensor size of ",
+                      shape.Size());
+        }
 
         // If it is an optional tensor type with no values (i.e.) None,
         // we won't even pass it in to Run() as part of the feeds,
@@ -760,6 +770,7 @@ class BaseTester {
   std::vector<Data> input_data_;
   std::vector<Data> output_data_;
   std::vector<OrtValue> fetches_;
+  int number_of_nodes_;
 
   bool testing_function_called_{};  // has the function that performs the actual testing been called yet?
 
@@ -861,7 +872,7 @@ class BaseTester {
   void AddShapeToTensorData(NodeArg& node_arg, gsl::span<const int64_t> dims,
                             const std::vector<std::string>* dim_params);
 
-  void CopyDataToTensor(gsl::span<const gsl::byte> data, Tensor& dst);
+  void CopyDataToTensor(gsl::span<const std::byte> data, Tensor& dst);
 
 #if !defined(DISABLE_SPARSE_TENSORS)
   NodeArg MakeSparseNodeArg(int32_t dtype, const char* name,
@@ -872,7 +883,7 @@ class BaseTester {
                               MLDataType data_type,
                               const char* name,
                               gsl::span<const int64_t> dims,
-                              gsl::span<const gsl::byte> values,
+                              gsl::span<const std::byte> values,
                               gsl::span<const int64_t> indices,
                               const ValidateOutputParams& check_params,
                               const std::vector<std::string>* dim_params = nullptr);
@@ -888,7 +899,7 @@ class BaseTester {
                               MLDataType data_type,
                               const char* name,
                               gsl::span<const int64_t> dims,
-                              gsl::span<const gsl::byte> values,
+                              gsl::span<const std::byte> values,
                               gsl::span<const int64_t> inner_indices,
                               gsl::span<const int64_t> outer_indices,
                               const ValidateOutputParams& check_params,

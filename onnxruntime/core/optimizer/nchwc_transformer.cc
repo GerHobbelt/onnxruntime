@@ -408,7 +408,7 @@ void NchwcTransformerImpl::TransformConv(Node& node) {
     // Reuse the existing NodeArg.
     nchwc_conv_W_arg = filters_it->second;
   } else {
-    Initializer conv_W{*conv_W_tensor_proto, graph_.ModelPath()};
+    Initializer conv_W{graph_, *conv_W_tensor_proto, graph_.ModelPath()};
     const auto conv_W_dims = conv_W.dims();
 
     int64_t reordered_filter_size = nchwc_output_channels * filter_input_channels;
@@ -428,7 +428,8 @@ void NchwcTransformerImpl::TransformConv(Node& node) {
 
     nchwc_conv_W_tensor_proto.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
     nchwc_conv_W_tensor_proto.set_name(graph_.GenerateNodeArgName("reorder"));
-    nchwc_conv_W_tensor_proto.set_raw_data(reordered_filter.data(), reordered_filter.size() * sizeof(float));
+    utils::SetRawDataInTensorProto(nchwc_conv_W_tensor_proto, reordered_filter.data(),
+                                   reordered_filter.size() * sizeof(float));
 
     nchwc_conv_W_tensor_proto.add_dims(nchwc_output_channels);
     nchwc_conv_W_tensor_proto.add_dims(filter_input_channels);
@@ -448,7 +449,7 @@ void NchwcTransformerImpl::TransformConv(Node& node) {
       // Reuse the existing NodeArg.
       nchwc_conv_B_arg = biases_it->second;
     } else {
-      Initializer conv_B{*conv_B_tensor_proto, graph_.ModelPath()};
+      Initializer conv_B{graph_, *conv_B_tensor_proto, graph_.ModelPath()};
 
       InlinedVector<float> aligned_bias(gsl::narrow<size_t>(nchwc_output_channels));
       ORT_ENFORCE(output_channels <= nchwc_output_channels, "Buffer overflow");
@@ -458,7 +459,8 @@ void NchwcTransformerImpl::TransformConv(Node& node) {
 
       nchwc_conv_B_tensor_proto.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
       nchwc_conv_B_tensor_proto.set_name(graph_.GenerateNodeArgName("reorder"));
-      nchwc_conv_B_tensor_proto.set_raw_data(aligned_bias.data(), gsl::narrow<size_t>(nchwc_output_channels) * sizeof(float));
+      utils::SetRawDataInTensorProto(nchwc_conv_B_tensor_proto, aligned_bias.data(),
+                                     gsl::narrow<size_t>(nchwc_output_channels) * sizeof(float));
 
       nchwc_conv_B_tensor_proto.add_dims(nchwc_output_channels);
 
@@ -861,10 +863,10 @@ void NchwcTransformerImpl::TransformBatchNormalization(Node& node) {
     return;
   }
 
-  Initializer bn_scale{*bn_scale_tensor_proto, graph_.ModelPath()};
-  Initializer bn_B{*bn_B_tensor_proto, graph_.ModelPath()};
-  Initializer bn_mean{*bn_mean_tensor_proto, graph_.ModelPath()};
-  Initializer bn_var{*bn_var_tensor_proto, graph_.ModelPath()};
+  Initializer bn_scale{graph_, *bn_scale_tensor_proto, graph_.ModelPath()};
+  Initializer bn_B{graph_, *bn_B_tensor_proto, graph_.ModelPath()};
+  Initializer bn_mean{graph_, *bn_mean_tensor_proto, graph_.ModelPath()};
+  Initializer bn_var{graph_, *bn_var_tensor_proto, graph_.ModelPath()};
 
   // Calculate the scale and bias for the replacement convolution.
   bn_var.add(epsilon);
@@ -883,7 +885,8 @@ void NchwcTransformerImpl::TransformBatchNormalization(Node& node) {
   ONNX_NAMESPACE::TensorProto nchwc_conv_W_tensor_proto;
   nchwc_conv_W_tensor_proto.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
   nchwc_conv_W_tensor_proto.set_name(graph_.GenerateNodeArgName("bn_scale"));
-  nchwc_conv_W_tensor_proto.set_raw_data(padded_buffer.data(), gsl::narrow<size_t>(nchwc_channels) * sizeof(float));
+  utils::SetRawDataInTensorProto(nchwc_conv_W_tensor_proto, padded_buffer.data(),
+                                 gsl::narrow<size_t>(nchwc_channels) * sizeof(float));
   nchwc_conv_W_tensor_proto.add_dims(nchwc_channels);
   nchwc_conv_W_tensor_proto.add_dims(1);
   nchwc_conv_W_tensor_proto.add_dims(1);
@@ -896,7 +899,8 @@ void NchwcTransformerImpl::TransformBatchNormalization(Node& node) {
   ONNX_NAMESPACE::TensorProto nchwc_conv_B_tensor_proto;
   nchwc_conv_B_tensor_proto.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
   nchwc_conv_B_tensor_proto.set_name(graph_.GenerateNodeArgName("bn_B"));
-  nchwc_conv_B_tensor_proto.set_raw_data(padded_buffer.data(), gsl::narrow<size_t>(nchwc_channels) * sizeof(float));
+  utils::SetRawDataInTensorProto(nchwc_conv_B_tensor_proto, padded_buffer.data(),
+                                 gsl::narrow<size_t>(nchwc_channels) * sizeof(float));
   nchwc_conv_B_tensor_proto.add_dims(nchwc_channels);
 
   auto* nchwc_conv_B_arg = &graph_utils::AddInitializer(graph_, nchwc_conv_B_tensor_proto);
@@ -1041,7 +1045,7 @@ void NchwcTransformerImpl::TransformResize(Node& node) {
       return;
     }
 
-    Initializer sizes{*sizes_tensor_proto, graph_.ModelPath()};
+    Initializer sizes{graph_, *sizes_tensor_proto, graph_.ModelPath()};
     auto* sizes_data = sizes.data<int64_t>();
 
     // The sizes data can only be used if the input shape is static and the
@@ -1071,7 +1075,7 @@ void NchwcTransformerImpl::TransformResize(Node& node) {
       return;
     }
 
-    Initializer scales{*scales_tensor_proto, graph_.ModelPath()};
+    Initializer scales{graph_, *scales_tensor_proto, graph_.ModelPath()};
     auto* scales_data = scales.data<float>();
 
     // Cast the scales to integers and verify that the scales are positive and

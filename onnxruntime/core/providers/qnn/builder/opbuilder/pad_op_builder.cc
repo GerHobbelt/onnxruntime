@@ -1,15 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "core/providers/common.h"
-#include "core/providers/shared/utils/utils.h"
+#include "core/providers/qnn/builder/opbuilder/base_op_builder.h"
 #include "core/providers/qnn/builder/qnn_model_wrapper.h"
 #include "core/providers/qnn/builder/op_builder_factory.h"
-#include "core/providers/cpu/tensor/slice_helper.h"
-#include "core/providers/qnn/builder/op_builder_factory.h"
-#include "core/common/safeint.h"
-
-#include "core/providers/qnn/builder/opbuilder/base_op_builder.h"
 #include "core/providers/qnn/builder/qnn_utils.h"
 
 namespace onnxruntime {
@@ -49,11 +43,11 @@ Status PadOpBuilder::ProcessInputs(QnnModelWrapper& qnn_model_wrapper,
     ORT_RETURN_IF(input_shape.size() > 5, "QNN Pad doesn't support more than 5 dimension");
 
     auto& pads_input_name = inputs[1].node_arg.Name();
-    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsInitializerInput(pads_input_name),
+    ORT_RETURN_IF_NOT(qnn_model_wrapper.IsConstantInput(pads_input_name),
                       "Qnn doesn't support dynamic pad input");
-    if (node_unit.Inputs().size() > 2) {
+    if (inputs.size() > 2 && inputs[2].node_arg.Exists()) {
       auto& constant_value_input_name = inputs[2].node_arg.Name();
-      ORT_RETURN_IF_NOT(qnn_model_wrapper.IsInitializerInput(constant_value_input_name),
+      ORT_RETURN_IF_NOT(qnn_model_wrapper.IsConstantInput(constant_value_input_name),
                         "Qnn doesn't support dynamic constant_value input");
     }
   }
@@ -163,7 +157,7 @@ Status ProcessConstantValue(QnnModelWrapper& qnn_model_wrapper,
       default:
         return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Type not supported.");
     }  // switch
-  }    // if-else
+  }  // if-else
 
   QnnParamWrapper constant_value_param(node_unit.Index(),
                                        node_unit.Name(),
@@ -187,7 +181,7 @@ Status PadOpBuilder::ProcessAttributesAndOutputs(QnnModelWrapper& qnn_model_wrap
   const auto& pads_input_name = inputs[1].node_arg.Name();
 
   std::vector<uint8_t> unpacked_tensor;
-  const auto& input_tensor = qnn_model_wrapper.GetInitializerTensors().at(pads_input_name);
+  const auto& input_tensor = qnn_model_wrapper.GetConstantTensor(pads_input_name);
   ORT_RETURN_IF_ERROR(qnn_model_wrapper.UnpackInitializerData(*input_tensor, unpacked_tensor));
   // Onnx Pads are int64, Qnn use uint32
   const int64_t* tensor_data = reinterpret_cast<const int64_t*>(unpacked_tensor.data());
@@ -199,7 +193,7 @@ Status PadOpBuilder::ProcessAttributesAndOutputs(QnnModelWrapper& qnn_model_wrap
                  [](int64_t item) { return SafeInt<uint32_t>(item); });
   // Onnx format is begin_0, begin_1, ..., end_0, end_1, ...
   // Qnn format is begin_0, end_0, begin_1, end_1, ...
-  ReArranagePads(pad_amount);
+  ReArrangePads(pad_amount);
 
   std::vector<uint32_t> input_shape;
   ORT_RETURN_IF_NOT(qnn_model_wrapper.GetOnnxShape(inputs[0].node_arg, input_shape), "Cannot get shape of input 0.");
@@ -227,13 +221,13 @@ Status PadOpBuilder::ProcessAttributesAndOutputs(QnnModelWrapper& qnn_model_wrap
   param_tensor_names.push_back(mode_param.GetParamTensorName());
   qnn_model_wrapper.AddParamWrapper(std::move(mode_param));
 
-  QnnParamWrapper multiples_param(node_unit.Index(), node_unit.Name(), QNN_OP_PAD_PARAM_PAD_AMOUNT,
-                                  std::move(pad_amount_dim), std::move(pad_amount));
-  param_tensor_names.push_back(multiples_param.GetParamTensorName());
-  qnn_model_wrapper.AddParamWrapper(std::move(multiples_param));
+  QnnParamWrapper pad_amount_param(node_unit.Index(), node_unit.Name(), QNN_OP_PAD_PARAM_PAD_AMOUNT,
+                                   std::move(pad_amount_dim), std::move(pad_amount));
+  param_tensor_names.push_back(pad_amount_param.GetParamTensorName());
+  qnn_model_wrapper.AddParamWrapper(std::move(pad_amount_param));
 
   // Process optional input constant_value
-  if (node_unit.Inputs().size() > 2) {
+  if (inputs.size() > 2 && inputs[2].node_arg.Exists()) {
     ORT_RETURN_IF_ERROR(ProcessConstantValue(qnn_model_wrapper, param_tensor_names, node_unit, inputs[2]));
   }  // constant_value
 

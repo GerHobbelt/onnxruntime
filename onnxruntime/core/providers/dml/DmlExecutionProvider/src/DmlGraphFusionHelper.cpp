@@ -117,9 +117,21 @@ namespace DmlGraphFusionHelper
         // The tensor may be stored as raw data or in typed fields.
         if (initializer->data_location() == onnx::TensorProto_DataLocation_EXTERNAL)
         {
-            THROW_IF_NOT_OK(onnxruntime::utils::UnpackInitializerData(*initializer, graph.ModelPath(), unpackedExternalTensor));
-            tensorPtr = reinterpret_cast<std::byte*>(unpackedExternalTensor.data());
-            tensorByteSize = unpackedExternalTensor.size();
+            std::basic_string<ORTCHAR_T> externalFilePath;
+            onnxruntime::FileOffsetType fileOffset;
+            SafeInt<size_t> safeTensorByteSize;
+            THROW_IF_NOT_OK(onnxruntime::utils::GetExternalDataInfo(*initializer,  graph.ModelPath(), /*out*/ externalFilePath, /*out*/ fileOffset, /*out*/ safeTensorByteSize));
+            if (externalFilePath == onnxruntime::utils::kTensorProtoMemoryAddressTag)
+            {
+                tensorPtr = reinterpret_cast<std::byte*>(fileOffset);
+                tensorByteSize = safeTensorByteSize;
+            }
+            else
+            {
+                THROW_IF_NOT_OK(onnxruntime::utils::UnpackInitializerData(*initializer, graph.ModelPath(), unpackedExternalTensor));
+                tensorPtr = reinterpret_cast<std::byte*>(unpackedExternalTensor.data());
+                tensorByteSize = unpackedExternalTensor.size();
+            }
         }
         else if (initializer->has_raw_data())
         {
@@ -368,7 +380,7 @@ namespace DmlGraphFusionHelper
 
                     DML_CONSTANT_DATA_GRAPH_NODE_DESC* constantNode = allocator.template Allocate<DML_CONSTANT_DATA_GRAPH_NODE_DESC>();
                     constantNode->Name = node.Name.data();
-                    constantNode->DataSize = constantData.dataSize;
+                    constantNode->DataSize = gsl::narrow_cast<size_t>(constantData.dataSize);
                     constantNode->Data = constantData.data;
                     dmlGraphNodes.push_back(DML_GRAPH_NODE_DESC{DML_GRAPH_NODE_TYPE_CONSTANT, constantNode});
                 }
@@ -845,11 +857,11 @@ namespace DmlGraphFusionHelper
             .Provider(onnxruntime::kDmlExecutionProvider);
 
         // Force the CPU inputs to be allocated on the CPU
-        for (int i = 0; i < subGraphInputArgNames.size(); ++i)
+        for (size_t i = 0; i < subGraphInputArgNames.size(); ++i)
         {
             if (dynamicCpuInputMap.find(subGraphInputArgNames[i]) != dynamicCpuInputMap.end())
             {
-                builder.InputMemoryType(OrtMemTypeCPUInput, i);
+                builder.InputMemoryType(OrtMemTypeCPUInput, static_cast<int>(i));
             }
         }
 
@@ -935,7 +947,8 @@ namespace DmlGraphFusionHelper
         const Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
         IWinmlExecutionProvider* winmlProvider,
         IExecutionProvider* provider,
-        IUnknown* persistentResourceAllocatorUnknown)
+        IUnknown* persistentResourceAllocatorUnknown,
+        bool keepTemporaryResourceAlive)
     {
         DML_BINDING_PROPERTIES execBindingProps = compiledExecutionPlanOperator->GetBindingProperties();
 
@@ -1042,6 +1055,11 @@ namespace DmlGraphFusionHelper
             }
 
             commandListState.tempBindingAllocId = tempAllocId;
+
+            if (keepTemporaryResourceAlive)
+            {
+                commandListState.temporaryResource = std::move(tempResource);
+            }
         }
 
         // Execute the command list and if it succeeds, update the fence value at which this command may be

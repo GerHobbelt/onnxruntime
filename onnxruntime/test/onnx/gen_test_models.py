@@ -94,7 +94,7 @@ def generate_size_op_test(type, X, test_folder):
 
 
 def generate_reducesum_op_test(X, test_folder):
-    type = onnx.mapping.NP_TYPE_TO_TENSOR_TYPE[X.dtype]
+    type = helper.np_dtype_to_tensor_dtype(X.dtype)
     data_dir = os.path.join(test_folder, "test_data_0")
     os.makedirs(data_dir, exist_ok=True)
     # Create one output (ValueInfoProto)
@@ -144,7 +144,7 @@ def test_abs(output_dir):
     )
     generate_abs_op_test(
         TensorProto.UINT16,
-        np.uint16([-32767, -4, 0, 3, 32767]),
+        np.uint16([0, 3, 32767, 65535]),
         os.path.join(output_dir, "test_abs_uint16"),
     )
     generate_abs_op_test(

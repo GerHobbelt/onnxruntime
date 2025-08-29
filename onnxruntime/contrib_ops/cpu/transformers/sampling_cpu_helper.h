@@ -61,7 +61,7 @@ Status Sample(AllocatorPtr& allocator,
               transformers::ISamplingState<T>* sampling_state,
               transformers::IGreedySearchState<T>* greedy_state,
               const transformers::IGenerationParameters* parameters,
-              const transformers::IConsoleDumper* dumper) {
+              const IConsoleDumper* dumper) {
   ORT_UNUSED_PARAMETER(dumper);
 
   gsl::span<T>& sorted_scores = sampling_state->sorted_scores;
@@ -93,7 +93,8 @@ Status Sample(AllocatorPtr& allocator,
 
 #ifdef DEBUG_GENERATION
   dumper->Print("sorted_scores", sorted_scores.data(), parameters->batch_size, parameters->vocab_size);
-  dumper->Print("sorted_indices", sorted_indices.data(), parameters->batch_size, parameters->vocab_size);
+  std::vector<int64_t> sorted_indices_copy(sorted_indices.begin(), sorted_indices.end());
+  dumper->Print("sorted_indices", sorted_indices_copy.data(), parameters->batch_size, parameters->vocab_size);
 #endif
 
   gsl::span<T>& cumulative_probs = sampling_state->cumulative_probs;
@@ -152,7 +153,7 @@ Status Sample(AllocatorPtr& allocator,
                                                         1,
                                                         generator,
                                                         *sampled_idx));
-  // TODO: update presense_mask()
+  // TODO: update presence_mask()
 #ifdef DEBUG_GENERATION
   dumper->Print("sampled_idx", *sampled_idx);
 #endif
